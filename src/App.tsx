@@ -1,6 +1,6 @@
 /**
- * Voice Studio — Kokoro TTS (inglés) + MMS-TTS (español)
- * Audio progresivo: empieza en segundos via AudioContext.
+ * Voice Studio — Kokoro TTS (inglés) + Web Speech API (español)
+ * Audio progresivo en inglés via AudioContext. Español nativo del navegador.
  * Open Source · Apache 2.0 · Sin API key · Sin límites
  */
 
@@ -22,26 +22,50 @@ import { motion, AnimatePresence } from 'motion/react';
 
 // ── Voces inglés (Kokoro TTS) ────────────────────────────────────────────────
 const ENGLISH_VOICES = [
-  { id: 'af_heart', label: 'Heart (inglés)', description: 'Femenina americana, cálida ⭐', gender: 'F' },
-  { id: 'af_bella', label: 'Bella (inglés)', description: 'Femenina americana, suave', gender: 'F' },
-  { id: 'af_sarah', label: 'Sarah (inglés)', description: 'Femenina americana, clara', gender: 'F' },
-  { id: 'af_nicole', label: 'Nicole (inglés)', description: 'Femenina americana, suave', gender: 'F' },
-  { id: 'af_sky', label: 'Sky (inglés)', description: 'Femenina americana, ligera', gender: 'F' },
-  { id: 'am_adam', label: 'Adam (inglés)', description: 'Masculina americana, profunda', gender: 'M' },
-  { id: 'am_michael', label: 'Michael (inglés)', description: 'Masculina americana, natural', gender: 'M' },
-  { id: 'bf_emma', label: 'Emma (inglés)', description: 'Femenina británica, elegante', gender: 'F' },
-  { id: 'bf_isabella', label: 'Isabella (inglés)', description: 'Femenina británica, sofist.', gender: 'F' },
-  { id: 'bm_george', label: 'George (inglés)', description: 'Masculina británica, profunda', gender: 'M' },
-  { id: 'bm_lewis', label: 'Lewis (inglés)', description: 'Masculina británica, resonante', gender: 'M' },
+  { id: 'af_heart', label: 'Heart', description: 'Femenina americana, cálida ⭐', gender: 'F' },
+  { id: 'af_bella', label: 'Bella', description: 'Femenina americana, suave', gender: 'F' },
+  { id: 'af_sarah', label: 'Sarah', description: 'Femenina americana, clara', gender: 'F' },
+  { id: 'af_nicole', label: 'Nicole', description: 'Femenina americana, suave', gender: 'F' },
+  { id: 'af_sky', label: 'Sky', description: 'Femenina americana, ligera', gender: 'F' },
+  { id: 'am_adam', label: 'Adam', description: 'Masculina americana, profunda', gender: 'M' },
+  { id: 'am_michael', label: 'Michael', description: 'Masculina americana, natural', gender: 'M' },
+  { id: 'bf_emma', label: 'Emma', description: 'Femenina británica, elegante', gender: 'F' },
+  { id: 'bf_isabella', label: 'Isabella', description: 'Femenina británica, sofist.', gender: 'F' },
+  { id: 'bm_george', label: 'George', description: 'Masculina británica, profunda', gender: 'M' },
+  { id: 'bm_lewis', label: 'Lewis', description: 'Masculina británica, resonante', gender: 'M' },
 ];
 
-// ── Voces español (Meta MMS-TTS) ─────────────────────────────────────────────
-const SPANISH_VOICES = [
-  { id: 'spa_female', label: 'María (español)', description: 'Voz femenina en español natural', gender: 'F' },
-  { id: 'spa_male', label: 'Carlos (español)', description: 'Voz masculina en español natural', gender: 'M' },
-];
+// ── Prioridad de dialectos en español ────────────────────────────────────────
+const ES_PRIORITY = ['es-MX', 'es-CO', 'es-AR', 'es-US', 'es-CL', 'es-PE', 'es-VE', 'es-ES'];
 
-// ── WAV encoder (para download) ───────────────────────────────────────────────
+function sortSpanishVoices(voices: SpeechSynthesisVoice[]): SpeechSynthesisVoice[] {
+  return [...voices].sort((a, b) => {
+    const ai = ES_PRIORITY.findIndex(l => a.lang.startsWith(l));
+    const bi = ES_PRIORITY.findIndex(l => b.lang.startsWith(l));
+    const an = ai === -1 ? 99 : ai;
+    const bn = bi === -1 ? 99 : bi;
+    return an - bn;
+  });
+}
+
+function getDialectLabel(lang: string): string {
+  const map: Record<string, string> = {
+    'es-MX': '🇲🇽 México',
+    'es-CO': '🇨🇴 Colombia',
+    'es-AR': '🇦🇷 Argentina',
+    'es-US': '🇺🇸 Español US',
+    'es-CL': '🇨🇱 Chile',
+    'es-PE': '🇵🇪 Perú',
+    'es-VE': '🇻🇪 Venezuela',
+    'es-ES': '🇪🇸 España',
+  };
+  for (const [key, label] of Object.entries(map)) {
+    if (lang.startsWith(key)) return label;
+  }
+  return `🌎 ${lang}`;
+}
+
+// ── WAV encoder (para download — solo inglés) ─────────────────────────────────
 function mergeToWavBlob(chunks: { audio: Float32Array; sampleRate: number }[]): Blob {
   if (chunks.length === 0) return new Blob([], { type: 'audio/wav' });
   const sampleRate = chunks[0].sampleRate;
@@ -75,16 +99,19 @@ export default function App() {
   );
   const [language, setLanguage] = useState<'en' | 'es'>('en');
   const [selectedVoice, setSelectedVoice] = useState('af_heart');
-  const [selectedSpanishVoice, setSelectedSpanishVoice] = useState('spa_female');
+
+  // Voces en español detectadas del sistema
+  const [spanishVoices, setSpanishVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const [selectedSpanishVoice, setSelectedSpanishVoice] = useState<string>('');
 
   const [status, setStatus] = useState<'idle' | 'loading' | 'generating' | 'playing'>('idle');
   const [statusMsg, setStatusMsg] = useState('');
   const [chunksReceived, setChunksReceived] = useState(0);
   const [deviceInfo, setDeviceInfo] = useState('');
-  const [downloadPct, setDownloadPct] = useState(0);      // 0-100
-  const [downloadMB, setDownloadMB] = useState('');       // "45.2 / 310 MB"
-  const [estimatedTotal, setEstimatedTotal] = useState(0); // oraciones estimadas
-  const [eta, setEta] = useState('');                      // "~2 min 30 seg"
+  const [downloadPct, setDownloadPct] = useState(0);
+  const [downloadMB, setDownloadMB] = useState('');
+  const [estimatedTotal, setEstimatedTotal] = useState(0);
+  const [eta, setEta] = useState('');
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -93,10 +120,28 @@ export default function App() {
   const nextStartRef = useRef<number>(0);
   const receivedChunksRef = useRef<{ audio: Float32Array; sampleRate: number }[]>([]);
   const downloadRef = useRef<string | null>(null);
-  const genStartRef = useRef<number>(0);    // timestamp when generation began
-  const genRateRef = useRef<number>(0);     // chunks per second
+  const genStartRef = useRef<number>(0);
+  const genRateRef = useRef<number>(0);
 
-  // Inicializar AudioContext (lazy, requiere gesto del usuario)
+  // ── Detectar voces en español del sistema ────────────────────────────────
+  useEffect(() => {
+    const loadVoices = () => {
+      const all = window.speechSynthesis.getVoices();
+      const esVoices = sortSpanishVoices(all.filter(v => v.lang.startsWith('es')));
+      setSpanishVoices(esVoices);
+      if (esVoices.length > 0 && !selectedSpanishVoice) {
+        setSelectedSpanishVoice(esVoices[0].name);
+      }
+    };
+
+    loadVoices();
+    // En Chrome, las voces se cargan de forma asíncrona
+    window.speechSynthesis.onvoiceschanged = loadVoices;
+    return () => { window.speechSynthesis.onvoiceschanged = null; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Inicializar AudioContext (lazy)
   const getAudioCtx = useCallback(() => {
     if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
       audioCtxRef.current = new AudioContext();
@@ -108,7 +153,7 @@ export default function App() {
     return audioCtxRef.current;
   }, []);
 
-  // Reproducir un chunk de Float32Array inmediatamente via AudioContext
+  // Reproducir chunk de audio (para inglés/Kokoro)
   const playChunk = useCallback((samples: Float32Array, sampleRate: number) => {
     const ctx = getAudioCtx();
     const buffer = ctx.createBuffer(1, samples.length, sampleRate);
@@ -117,12 +162,12 @@ export default function App() {
     src.buffer = buffer;
     src.connect(ctx.destination);
     const now = ctx.currentTime;
-    const start = Math.max(nextStartRef.current, now + 0.02); // pequeño buffer de seguridad
+    const start = Math.max(nextStartRef.current, now + 0.02);
     src.start(start);
     nextStartRef.current = start + buffer.duration;
   }, [getAudioCtx]);
 
-  // Web Worker
+  // Web Worker (solo inglés)
   useEffect(() => {
     const worker = new Worker(
       new URL('./tts.worker.ts', import.meta.url),
@@ -163,13 +208,12 @@ export default function App() {
           receivedChunksRef.current.push({ audio: msg.audio, sampleRate: msg.sampleRate });
           const n = receivedChunksRef.current.length;
           setChunksReceived(n);
-          // Calcular tasa real y ETA
           const elapsed = (Date.now() - genStartRef.current) / 1000;
           const rate = elapsed > 0 ? n / elapsed : 0;
           genRateRef.current = rate;
           if (rate > 0) {
             setEstimatedTotal(prev => {
-              const total = prev > 0 ? prev : n; // si aún no hay estimado, usar n
+              const total = prev > 0 ? prev : n;
               const remaining = Math.max(0, total - n);
               const secsLeft = remaining / rate;
               if (secsLeft < 5) {
@@ -179,7 +223,7 @@ export default function App() {
                 const s = Math.round(secsLeft % 60);
                 setEta(m > 0 ? `~${m} min ${s} seg restantes` : `~${s} seg restantes`);
               }
-              return prev; // no cambiar el total estimado
+              return prev;
             });
           }
           if (msg.index === 0) setStatus('playing');
@@ -187,7 +231,6 @@ export default function App() {
         }
 
         case 'done': {
-          // Crear blob WAV del audio completo para download
           const blob = mergeToWavBlob(receivedChunksRef.current);
           const url = URL.createObjectURL(blob);
           if (downloadRef.current) URL.revokeObjectURL(downloadRef.current);
@@ -210,11 +253,56 @@ export default function App() {
     return () => { worker.terminate(); };
   }, [playChunk]);
 
+  // ── Generar voz en español con Web Speech API ────────────────────────────
+  const generateSpanish = useCallback(() => {
+    if (!text.trim()) return;
+
+    // Cancelar síntesis anterior si existe
+    window.speechSynthesis.cancel();
+
+    setStatus('playing');
+    setError(null);
+    setAudioUrl(null);
+    setChunksReceived(0);
+
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = 'es';
+    utterance.rate = 0.95;
+    utterance.pitch = 1.0;
+
+    // Asignar la voz seleccionada
+    if (selectedSpanishVoice) {
+      const voice = spanishVoices.find(v => v.name === selectedSpanishVoice);
+      if (voice) utterance.voice = voice;
+    }
+
+    utterance.onstart = () => {
+      setStatusMsg('Reproduciendo...');
+    };
+
+    utterance.onend = () => {
+      setStatus('idle');
+      setStatusMsg('');
+    };
+
+    utterance.onerror = (e) => {
+      if (e.error === 'interrupted' || e.error === 'canceled') return;
+      setStatus('idle');
+      setStatusMsg('');
+      setError(`Error de síntesis: ${e.error}`);
+    };
+
+    window.speechSynthesis.speak(utterance);
+  }, [text, selectedSpanishVoice, spanishVoices]);
+
   const generateSpeech = useCallback(() => {
+    if (language === 'es') {
+      generateSpanish();
+      return;
+    }
+
     if (!text.trim() || !workerRef.current) return;
 
-    // Reset estado
-    // Estimar total de oraciones: ~1 oración cada 120 chars (promedio)
     const est = Math.max(1, Math.ceil(text.length / 120));
     setEstimatedTotal(est);
     setEta('');
@@ -225,19 +313,23 @@ export default function App() {
     receivedChunksRef.current = [];
     setAudioUrl(null);
 
-    // Reset AudioContext para nueva generación
     if (audioCtxRef.current) {
       audioCtxRef.current.close();
       audioCtxRef.current = null;
     }
     nextStartRef.current = 0;
 
-    const voice = language === 'en' ? selectedVoice : selectedSpanishVoice;
-    const msg: WorkerInMessage = { type: 'generate', text, language, voice };
+    const msg: WorkerInMessage = { type: 'generate', text, voice: selectedVoice };
     workerRef.current.postMessage(msg);
-  }, [text, language, selectedVoice, selectedSpanishVoice]);
+  }, [text, language, selectedVoice, generateSpanish]);
 
   const cancelGeneration = useCallback(() => {
+    if (language === 'es') {
+      window.speechSynthesis.cancel();
+      setStatus('idle');
+      setStatusMsg('');
+      return;
+    }
     workerRef.current?.postMessage({ type: 'cancel' } satisfies WorkerInMessage);
     if (audioCtxRef.current) {
       audioCtxRef.current.close();
@@ -246,15 +338,14 @@ export default function App() {
     setStatus('idle');
     setStatusMsg('');
     setChunksReceived(0);
-  }, []);
+  }, [language]);
 
   const handleDownload = () => {
     const url = downloadRef.current || audioUrl;
     if (!url) return;
-    const voice = language === 'en' ? selectedVoice : selectedSpanishVoice;
     const a = document.createElement('a');
     a.href = url;
-    a.download = `voice-studio-${voice}-${Date.now()}.wav`;
+    a.download = `voice-studio-${selectedVoice}-${Date.now()}.wav`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -263,13 +354,8 @@ export default function App() {
   const isActive = status !== 'idle';
   const femaleVoices = ENGLISH_VOICES.filter(v => v.gender === 'F');
   const maleVoices = ENGLISH_VOICES.filter(v => v.gender === 'M');
-
-  const getButtonLabel = () => {
-    if (status === 'loading') return statusMsg || 'Cargando modelo...';
-    if (status === 'generating') return 'Generando...';
-    if (status === 'playing') return `Reproduciendo... (${chunksReceived} frases)`;
-    return 'Generar Voz';
-  };
+  const femaleSpanish = spanishVoices.filter(v => v.name.toLowerCase().includes('female') || v.name.toLowerCase().includes('mujer') || /[^a-z](f|femenin)/i.test(v.name) || v.gender === 'female');
+  const maleSpanish = spanishVoices.filter(v => !femaleSpanish.includes(v));
 
   return (
     <div className="min-h-screen bg-[#f5f2ed] text-[#1a1a1a] font-sans selection:bg-[#5A5A40]/20">
@@ -293,8 +379,8 @@ export default function App() {
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.3 }}
             className="mt-3 inline-flex items-center gap-2 text-xs text-[#5A5A40]/70 bg-[#5A5A40]/8 px-3 py-1.5 rounded-full">
             <Cpu className="w-3 h-3" />
-            Kokoro TTS · Meta MMS-TTS · Apache 2.0
-            {deviceInfo && <span className="font-medium text-[#5A5A40]">· {deviceInfo}</span>}
+            {language === 'en' ? 'Kokoro TTS · Apache 2.0' : `Web Speech API · ${spanishVoices.length} voces detectadas`}
+            {deviceInfo && language === 'en' && <span className="font-medium text-[#5A5A40]">· {deviceInfo}</span>}
           </motion.div>
         </header>
 
@@ -310,7 +396,7 @@ export default function App() {
             <div className="grid grid-cols-2 gap-3">
               {([
                 { id: 'en', flag: '🇺🇸', label: 'English', sub: 'Kokoro TTS · Grado A · Streaming' },
-                { id: 'es', flag: '🇪🇸', label: 'Español', sub: 'Meta MMS-TTS · Acento nativo' },
+                { id: 'es', flag: '🌎', label: 'Español Latino', sub: `Web Speech API · ${spanishVoices.length} voces` },
               ] as const).map(({ id, flag, label, sub }) => (
                 <button key={id} onClick={() => setLanguage(id)}
                   className={`flex flex-col items-start p-4 rounded-2xl border transition-all text-left ${language === id ? 'bg-[#5A5A40] border-[#5A5A40] text-white shadow-md' : 'bg-[#f9f8f6] border-black/5 text-[#1a1a1a] hover:border-[#5A5A40]/30'}`}>
@@ -370,17 +456,34 @@ export default function App() {
                   </motion.div>
                 ) : (
                   <motion.div key="es" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-                    <p className="text-xs font-medium text-[#1a1a1a]/40 uppercase tracking-wider mb-3">Voces · Meta MMS-TTS</p>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      {SPANISH_VOICES.map(v => (
-                        <button key={v.id} onClick={() => setSelectedSpanishVoice(v.id)}
-                          className={`flex flex-col items-start p-4 rounded-2xl border transition-all text-left ${selectedSpanishVoice === v.id ? 'bg-[#5A5A40] border-[#5A5A40] text-white shadow-md' : 'bg-[#f9f8f6] border-black/5 text-[#1a1a1a] hover:border-[#5A5A40]/30'}`}>
-                          <span className="font-medium mb-1">{v.label}</span>
-                          <span className={`text-xs ${selectedSpanishVoice === v.id ? 'text-white/70' : 'text-[#1a1a1a]/50'}`}>{v.description}</span>
-                        </button>
-                      ))}
-                    </div>
-                    <p className="text-xs text-[#1a1a1a]/40 mt-4 italic">Modelo multilingüe de Meta — acento nativo en español.</p>
+                    {spanishVoices.length === 0 ? (
+                      <div className="text-center py-8 text-[#1a1a1a]/40">
+                        <p className="text-sm">No se detectaron voces en español.</p>
+                        <p className="text-xs mt-1">Instala voces en español en la configuración del sistema.</p>
+                      </div>
+                    ) : (
+                      <>
+                        {maleSpanish.length > 0 && (
+                          <>
+                            <p className="text-xs font-medium text-[#1a1a1a]/40 uppercase tracking-wider mb-3">Todas las voces</p>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                              {spanishVoices.map(v => (
+                                <button key={v.name} onClick={() => setSelectedSpanishVoice(v.name)}
+                                  className={`flex flex-col items-start p-4 rounded-2xl border transition-all text-left ${selectedSpanishVoice === v.name ? 'bg-[#5A5A40] border-[#5A5A40] text-white shadow-md' : 'bg-[#f9f8f6] border-black/5 text-[#1a1a1a] hover:border-[#5A5A40]/30'}`}>
+                                  <span className="font-medium mb-1 text-sm leading-tight">{v.name}</span>
+                                  <span className={`text-xs ${selectedSpanishVoice === v.name ? 'text-white/70' : 'text-[#1a1a1a]/50'}`}>
+                                    {getDialectLabel(v.lang)}{v.localService ? ' · Local' : ' · Online'}
+                                  </span>
+                                </button>
+                              ))}
+                            </div>
+                          </>
+                        )}
+                        <p className="text-xs text-[#1a1a1a]/40 mt-4 italic">
+                          Voces nativas de tu sistema — respetan comas, signos y entonación.
+                        </p>
+                      </>
+                    )}
                   </motion.div>
                 )}
               </AnimatePresence>
@@ -421,10 +524,10 @@ export default function App() {
                     {status === 'idle' && 'Generar Voz'}
                     {status === 'loading' && (downloadPct > 0 ? 'Descargando modelo...' : 'Iniciando...')}
                     {status === 'generating' && 'Generando audio...'}
-                    {status === 'playing' && 'Generando y reproduciendo...'}
+                    {status === 'playing' && (language === 'es' ? 'Reproduciendo...' : 'Generando y reproduciendo...')}
                   </span>
 
-                  {/* Progreso descarga con barra visual + MB */}
+                  {/* Progreso descarga */}
                   {status === 'loading' && downloadPct > 0 && (
                     <div className="w-full">
                       <div className="flex justify-between text-xs text-white/60 mb-1">
@@ -442,8 +545,8 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* Contador de oraciones + ETA */}
-                  {(status === 'generating' || status === 'playing') && chunksReceived > 0 && (
+                  {/* Contador oraciones (inglés) */}
+                  {language === 'en' && (status === 'generating' || status === 'playing') && chunksReceived > 0 && (
                     <div className="text-xs text-white/60 space-y-0.5">
                       <p>
                         {chunksReceived} / ~{estimatedTotal} {estimatedTotal === 1 ? 'oración' : 'oraciones'}
@@ -460,7 +563,7 @@ export default function App() {
             </motion.section>
           </div>
 
-          {/* Output: disponible para descarga al finalizar */}
+          {/* Output: WAV solo para inglés */}
           <AnimatePresence>
             {(audioUrl || error) && (
               <motion.section
@@ -498,7 +601,7 @@ export default function App() {
             © {new Date().getFullYear()} Voice Studio ·{' '}
             <a href="https://github.com/hexgrad/kokoro" target="_blank" rel="noopener noreferrer" className="hover:text-[#5A5A40] transition-colors">Kokoro TTS</a>
             {' · '}
-            <a href="https://huggingface.co/facebook/mms-tts" target="_blank" rel="noopener noreferrer" className="hover:text-[#5A5A40] transition-colors">Meta MMS-TTS</a>
+            <a href="https://developer.mozilla.org/en-US/docs/Web/API/Web_Speech_API" target="_blank" rel="noopener noreferrer" className="hover:text-[#5A5A40] transition-colors">Web Speech API</a>
             {' · '}Open Source · Apache 2.0
           </p>
         </footer>
