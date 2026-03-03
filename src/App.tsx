@@ -35,16 +35,24 @@ const ENGLISH_VOICES = [
   { id: 'bm_lewis', label: 'Lewis', description: 'Masculina británica, resonante', gender: 'M' },
 ];
 
-// ── Prioridad de dialectos en español ────────────────────────────────────────
-const ES_PRIORITY = ['es-MX', 'es-CO', 'es-AR', 'es-US', 'es-CL', 'es-PE', 'es-VE', 'es-ES'];
+// ── Dialectos disponibles para el selector de acento ────────────────────────
+const ES_DIALECTS = [
+  { lang: 'es-US', label: '🇺🇸 Español (EE.UU.)' },
+  { lang: 'es-MX', label: '🇲🇽 México' },
+  { lang: 'es-CO', label: '🇨🇴 Colombia' },
+  { lang: 'es-AR', label: '🇦🇷 Argentina' },
+  { lang: 'es-CL', label: '🇨🇱 Chile' },
+  { lang: 'es-PE', label: '🇵🇪 Perú' },
+  { lang: 'es-VE', label: '🇻🇪 Venezuela' },
+  { lang: 'es-ES', label: '🇪🇸 España' },
+];
 
 function sortSpanishVoices(voices: SpeechSynthesisVoice[]): SpeechSynthesisVoice[] {
+  // Google voices primero (mejor calidad), luego el resto
   return [...voices].sort((a, b) => {
-    const ai = ES_PRIORITY.findIndex(l => a.lang.startsWith(l));
-    const bi = ES_PRIORITY.findIndex(l => b.lang.startsWith(l));
-    const an = ai === -1 ? 99 : ai;
-    const bn = bi === -1 ? 99 : bi;
-    return an - bn;
+    const ag = a.name.toLowerCase().includes('google') ? 0 : 1;
+    const bg = b.name.toLowerCase().includes('google') ? 0 : 1;
+    return ag - bg;
   });
 }
 
@@ -103,6 +111,8 @@ export default function App() {
   // Voces en español detectadas del sistema
   const [spanishVoices, setSpanishVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [selectedSpanishVoice, setSelectedSpanishVoice] = useState<string>('');
+  // Dialecto (lang) independiente de la voz seleccionada
+  const [spanishDialect, setSpanishDialect] = useState<string>('es-US');
 
   const [status, setStatus] = useState<'idle' | 'loading' | 'generating' | 'playing'>('idle');
   const [statusMsg, setStatusMsg] = useState('');
@@ -266,7 +276,8 @@ export default function App() {
     setChunksReceived(0);
 
     const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = 'es';
+    // Usamos el dialecto seleccionado (acento) independiente de la voz (calidad)
+    utterance.lang = spanishDialect;
     utterance.rate = 0.95;
     utterance.pitch = 1.0;
 
@@ -293,7 +304,7 @@ export default function App() {
     };
 
     window.speechSynthesis.speak(utterance);
-  }, [text, selectedSpanishVoice, spanishVoices]);
+  }, [text, selectedSpanishVoice, spanishVoices, spanishDialect]);
 
   const generateSpeech = useCallback(() => {
     if (language === 'es') {
@@ -463,24 +474,42 @@ export default function App() {
                       </div>
                     ) : (
                       <>
-                        {maleSpanish.length > 0 && (
-                          <>
-                            <p className="text-xs font-medium text-[#1a1a1a]/40 uppercase tracking-wider mb-3">Todas las voces</p>
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                              {spanishVoices.map(v => (
-                                <button key={v.name} onClick={() => setSelectedSpanishVoice(v.name)}
-                                  className={`flex flex-col items-start p-4 rounded-2xl border transition-all text-left ${selectedSpanishVoice === v.name ? 'bg-[#5A5A40] border-[#5A5A40] text-white shadow-md' : 'bg-[#f9f8f6] border-black/5 text-[#1a1a1a] hover:border-[#5A5A40]/30'}`}>
-                                  <span className="font-medium mb-1 text-sm leading-tight">{v.name}</span>
-                                  <span className={`text-xs ${selectedSpanishVoice === v.name ? 'text-white/70' : 'text-[#1a1a1a]/50'}`}>
-                                    {getDialectLabel(v.lang)}{v.localService ? ' · Local' : ' · Online'}
-                                  </span>
-                                </button>
-                              ))}
-                            </div>
-                          </>
-                        )}
+                        {/* Selector de dialecto/acento */}
+                        <p className="text-xs font-medium text-[#1a1a1a]/40 uppercase tracking-wider mb-3">Dialecto / Acento</p>
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-6">
+                          {ES_DIALECTS.map(d => (
+                            <button key={d.lang} onClick={() => setSpanishDialect(d.lang)}
+                              className={`px-3 py-2 rounded-xl border text-xs font-medium transition-all text-center ${spanishDialect === d.lang ? 'bg-[#5A5A40] border-[#5A5A40] text-white shadow-md' : 'bg-[#f9f8f6] border-black/5 text-[#1a1a1a] hover:border-[#5A5A40]/30'}`}>
+                              {d.label}
+                            </button>
+                          ))}
+                        </div>
+
+                        {/* Selector de voz */}
+                        <p className="text-xs font-medium text-[#1a1a1a]/40 uppercase tracking-wider mb-3">Voz (Motor)</p>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                          {spanishVoices.map(v => {
+                            const isGoogle = v.name.toLowerCase().includes('google');
+                            return (
+                              <button key={v.name} onClick={() => setSelectedSpanishVoice(v.name)}
+                                className={`flex flex-col items-start p-4 rounded-2xl border transition-all text-left ${selectedSpanishVoice === v.name ? 'bg-[#5A5A40] border-[#5A5A40] text-white shadow-md' : 'bg-[#f9f8f6] border-black/5 text-[#1a1a1a] hover:border-[#5A5A40]/30'}`}>
+                                <div className="flex items-center gap-2 mb-1">
+                                  <span className="font-medium text-sm leading-tight">{v.name}</span>
+                                  {isGoogle && (
+                                    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${selectedSpanishVoice === v.name ? 'bg-white/20 text-white' : 'bg-[#5A5A40]/10 text-[#5A5A40]'}`}>
+                                      ⭐ HD
+                                    </span>
+                                  )}
+                                </div>
+                                <span className={`text-xs ${selectedSpanishVoice === v.name ? 'text-white/70' : 'text-[#1a1a1a]/50'}`}>
+                                  {v.lang}{v.localService ? ' · Local' : ' · Online'}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
                         <p className="text-xs text-[#1a1a1a]/40 mt-4 italic">
-                          Voces nativas de tu sistema — respetan comas, signos y entonación.
+                          💡 Combina una voz ⭐ HD con el dialecto que prefieras para mejor resultado.
                         </p>
                       </>
                     )}
