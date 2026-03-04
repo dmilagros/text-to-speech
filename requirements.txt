@@ -1,0 +1,11 @@
+fastapi==0.115.0
+uvicorn==0.30.6
+numpy==1.26.4
+coqui-tts==0.25.3
+transformers==4.46.3
+torch==2.10.0
+torchaudio==2.10.0
+hangul_romanize==0.1.0
+cutlet==0.5.0
+fugashi==1.5.2
+unidic-lite==1.0.8

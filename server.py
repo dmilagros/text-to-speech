@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """
 Coqui TTS Server — XTTS v2 con 28 hablantes × 17 idiomas
-Sin API key · Sin límites · Puerto: 3001
+Local: puerto 3001 | Hugging Face Spaces: puerto 7860
+Sin API key · Sin límites
 """
+import os
+# Aceptar licencia CPML automáticamente (para HF Spaces y CI)
+os.environ.setdefault("COQUI_TOS_AGREED", "1")
 
 import io
 import wave
@@ -14,7 +18,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 
-PORT = 3001
+# En HF Spaces usa puerto 7860; localmente 3001
+PORT = int(os.environ.get("PORT", "7860" if os.environ.get("SPACE_ID") else "3001"))
 
 # ── 28 hablantes integrados en XTTS v2 ───────────────────────────────────────
 # Cada uno es una persona real cuya voz fue usada en el entrenamiento.

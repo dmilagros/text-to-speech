@@ -13,6 +13,11 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
+// URL base del servidor Coqui TTS
+// En desarrollo: proxy Vite a localhost:3001
+// En producción (GitHub Pages): variable de entorno VITE_API_BASE
+const API_BASE = import.meta.env.VITE_API_BASE ?? '';
+
 // ── Tipos ─────────────────────────────────────────────────────────────────────
 
 interface XttsSpeaker {
@@ -165,8 +170,8 @@ export default function App() {
   // Intentar conectar con servidor Coqui; si falla, usar Web Speech API
   useEffect(() => {
     Promise.all([
-      fetch('/api/speakers').then(r => { if (!r.ok) throw new Error(); return r.json(); }),
-      fetch('/api/languages').then(r => { if (!r.ok) throw new Error(); return r.json(); }),
+      fetch(`${API_BASE}/api/speakers`).then(r => { if (!r.ok) throw new Error(); return r.json(); }),
+      fetch(`${API_BASE}/api/languages`).then(r => { if (!r.ok) throw new Error(); return r.json(); }),
     ]).then(([spks, langs]: [XttsSpeaker[], XttsLanguage[]]) => {
       setCoquiSpeakers(spks);
       setCoquiLanguages(langs);
@@ -282,7 +287,7 @@ export default function App() {
     setStatusMsg(`${coquiCurrentSpeaker?.name ?? coquiSpeaker} · ${coquiCurrentLang?.name ?? coquiLang}`);
     try {
       const params = new URLSearchParams({ text, speaker: coquiSpeaker, language: coquiLang });
-      const res = await fetch(`/api/tts?${params}`, { signal: abortRef.current.signal });
+      const res = await fetch(`${API_BASE}/api/tts?${params}`, { signal: abortRef.current.signal });
       if (!res.ok) { const e = await res.json().catch(() => ({ detail: `HTTP ${res.status}` })); throw new Error(e.detail); }
       setStatus('playing');
       const blob = await res.blob();
