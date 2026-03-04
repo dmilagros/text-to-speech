@@ -33,7 +33,7 @@ jobs:
       - name: Build
         run: npm run build
         env:
-          VITE_API_BASE: ${{ secrets.COQUI_API_URL }}
+          VITE_API_BASE: https://dmilagros-voice-studio-tts.hf.space
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
