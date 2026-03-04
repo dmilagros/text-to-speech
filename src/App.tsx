@@ -1,11 +1,12 @@
 /**
- * Voice Studio
+ * Voice Studio con Karaoke
  * ─ Local (con npm run server): Coqui XTTS v2 — 28 hablantes × 17 idiomas
  * ─ Deploy (GitHub Pages):     Web Speech API del navegador — voces del sistema
  * ─ Inglés siempre:            Kokoro TTS — calidad premium (streaming)
+ * ─ Karaoke: sincronización de palabras durante la reproducción
  */
 
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import type { WorkerOutMessage, WorkerInMessage } from './tts.worker';
 import {
   Volume2, Play, Square, Loader2, Mic2, Settings2,
@@ -13,38 +14,33 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
-// URL base del servidor Coqui TTS
-// En desarrollo: proxy Vite a localhost:3001
-// En producción (GitHub Pages): variable de entorno VITE_API_BASE
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
 
 // ── Tipos ─────────────────────────────────────────────────────────────────────
 
-interface XttsSpeaker {
-  id: string;
-  name: string;
-  gender: 'F' | 'M';
-}
-
-interface XttsLanguage {
-  code: string;
-  name: string;
-  flag: string;
-}
-
+interface XttsSpeaker { id: string; name: string; gender: 'F' | 'M'; }
+interface XttsLanguage { code: string; name: string; flag: string; }
 interface WSSVoice {
-  id: string;
-  name: string;
-  lang: string;
-  gender: 'F' | 'M' | '?';
-  flag: string;
-  langName: string;
+  id: string; name: string; lang: string;
+  gender: 'F' | 'M' | '?'; flag: string; langName: string;
   raw: SpeechSynthesisVoice;
 }
-
 type TtsMode = 'kokoro' | 'coqui' | 'webspeech';
 
-// ── Utilidades Web Speech API ─────────────────────────────────────────────────
+// ── Karaoke helpers ───────────────────────────────────────────────────────────
+
+/** Divide texto en tokens (palabras + espacios) para karaoke */
+function tokenize(text: string): { word: string; isSpace: boolean; charStart: number }[] {
+  const tokens: { word: string; isSpace: boolean; charStart: number }[] = [];
+  const regex = /(\S+|\s+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = regex.exec(text)) !== null) {
+    tokens.push({ word: m[0], isSpace: /^\s+$/.test(m[0]), charStart: m.index });
+  }
+  return tokens;
+}
+
+// ── Web Speech helpers ────────────────────────────────────────────────────────
 
 const LANG_FLAGS: Record<string, string> = {
   es: '🌎', en: '🇺🇸', fr: '🇫🇷', de: '🇩🇪', it: '🇮🇹',
@@ -62,24 +58,17 @@ const LANG_NAMES: Record<string, string> = {
 function getWSVoices(): WSSVoice[] {
   const voices = window.speechSynthesis.getVoices();
   const seen = new Set<string>();
-  return voices
-    .filter(v => !seen.has(v.voiceURI) && seen.add(v.voiceURI))
-    .map(v => {
-      const langCode = v.lang.split('-')[0].toLowerCase();
-      const nameLower = v.name.toLowerCase();
-      const gender: 'F' | 'M' | '?' =
-        /female|mujer|femme|frau|donna|mulher|kvinna|femenin|girl|woman/i.test(nameLower) ? 'F' :
-          /male|hombre|homme|mann|uomo|homem|man/i.test(nameLower) ? 'M' : '?';
-      return {
-        id: v.voiceURI,
-        name: v.name,
-        lang: langCode,
-        gender,
-        flag: LANG_FLAGS[langCode] ?? '🌐',
-        langName: LANG_NAMES[langCode] ?? langCode.toUpperCase(),
-        raw: v,
-      };
-    });
+  return voices.filter(v => !seen.has(v.voiceURI) && seen.add(v.voiceURI)).map(v => {
+    const langCode = v.lang.split('-')[0].toLowerCase();
+    const n = v.name.toLowerCase();
+    const gender: 'F' | 'M' | '?' =
+      /female|mujer|femme|frau|donna|mulher|kvinna|girl|woman/i.test(n) ? 'F' :
+        /male|hombre|homme|mann|uomo|homem|man/i.test(n) ? 'M' : '?';
+    return {
+      id: v.voiceURI, name: v.name, lang: langCode, gender,
+      flag: LANG_FLAGS[langCode] ?? '🌐', langName: LANG_NAMES[langCode] ?? langCode.toUpperCase(), raw: v
+    };
+  });
 }
 
 // ── Kokoro voices ─────────────────────────────────────────────────────────────
@@ -88,14 +77,14 @@ const KOKORO_VOICES = [
   { id: 'af_heart', label: 'Heart', description: 'Americana · warm ⭐', gender: 'F' },
   { id: 'af_bella', label: 'Bella', description: 'Americana · soft', gender: 'F' },
   { id: 'af_sarah', label: 'Sarah', description: 'Americana · clear', gender: 'F' },
-  { id: 'af_nicole', label: 'Nicole', description: 'Americana · soft', gender: 'F' },
+  { id: 'af_nicole', label: 'Nicole', description: 'Americana · ASMR', gender: 'F' },
   { id: 'am_adam', label: 'Adam', description: 'Americano · deep', gender: 'M' },
   { id: 'am_michael', label: 'Michael', description: 'Americano · natural', gender: 'M' },
   { id: 'bf_emma', label: 'Emma', description: 'Británica · elegant', gender: 'F' },
   { id: 'bm_george', label: 'George', description: 'Británico · deep', gender: 'M' },
 ];
 
-// ── WAV encoder ───────────────────────────────────────────────────────────────
+// ── WAV encoder (Kokoro) ──────────────────────────────────────────────────────
 
 function mergeToWavBlob(chunks: { audio: Float32Array; sampleRate: number }[]): Blob {
   if (!chunks.length) return new Blob([], { type: 'audio/wav' });
@@ -116,6 +105,49 @@ function mergeToWavBlob(chunks: { audio: Float32Array; sampleRate: number }[]): 
     v.setInt16(p, s < 0 ? s * 0x8000 : s * 0x7fff, true); p += 2;
   }
   return new Blob([buf], { type: 'audio/wav' });
+}
+
+// ── KaraokeDisplay ────────────────────────────────────────────────────────────
+
+function KaraokeDisplay({ text, activeChar }: { text: string; activeChar: number }) {
+  const tokens = useMemo(() => tokenize(text), [text]);
+
+  // Encuentra el token activo por charIndex
+  const activeIdx = useMemo(() => {
+    if (activeChar < 0) return -1;
+    let best = -1;
+    for (let i = 0; i < tokens.length; i++) {
+      const t = tokens[i];
+      if (!t.isSpace && t.charStart <= activeChar) best = i;
+    }
+    return best;
+  }, [activeChar, tokens]);
+
+  return (
+    <div className="leading-relaxed text-center px-2 py-4 select-none">
+      {tokens.map((t, i) => {
+        if (t.isSpace) return <span key={i}>{t.word}</span>;
+        const isActive = i === activeIdx;
+        const isPast = !isActive && activeIdx >= 0 && i < activeIdx;
+        return (
+          <motion.span
+            key={i}
+            animate={isActive ? { scale: 1.35, opacity: 1 } : isPast ? { scale: 1, opacity: 0.4 } : { scale: 1, opacity: 0.85 }}
+            transition={{ type: 'spring', stiffness: 400, damping: 25 }}
+            className={`inline-block font-serif transition-colors duration-150 ${isActive
+                ? 'text-[#5A5A40] font-bold'
+                : isPast
+                  ? 'text-[#1a1a1a]/40'
+                  : 'text-[#1a1a1a]'
+              }`}
+            style={{ transformOrigin: 'bottom center' }}
+          >
+            {t.word}
+          </motion.span>
+        );
+      })}
+    </div>
+  );
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -156,6 +188,10 @@ export default function App() {
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Karaoke state
+  const [activeChar, setActiveChar] = useState(-1);
+  const [isKaraoke, setIsKaraoke] = useState(false);
+
   const workerRef = useRef<Worker | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const nextStartRef = useRef<number>(0);
@@ -164,10 +200,47 @@ export default function App() {
   const genStartRef = useRef<number>(0);
   const abortRef = useRef<AbortController | null>(null);
   const audioElRef = useRef<HTMLAudioElement | null>(null);
+  const rafRef = useRef<number>(0);
+  const karaokeAudioRef = useRef<HTMLAudioElement | null>(null);
 
-  // ── Inicialización ────────────────────────────────────────────────────────
+  // Tokens memoizados para karaoke por tiempo (palabras no-espacio)
+  const wordsOnly = useMemo(() => tokenize(text).filter(t => !t.isSpace), [text]);
 
-  // Intentar conectar con servidor Coqui; si falla, usar Web Speech API
+  // ── Karaoke por tiempo (para Coqui y Kokoro) ──────────────────────────────
+
+  const startTimeKaraoke = useCallback((audioEl: HTMLAudioElement) => {
+    karaokeAudioRef.current = audioEl;
+    setIsKaraoke(true);
+
+    const tick = () => {
+      const el = karaokeAudioRef.current;
+      if (!el || el.paused || el.ended) return;
+      const frac = el.currentTime / (el.duration || 1);
+      const wordIdx = Math.min(Math.floor(frac * wordsOnly.length), wordsOnly.length - 1);
+      setActiveChar(wordsOnly[wordIdx]?.charStart ?? 0);
+      rafRef.current = requestAnimationFrame(tick);
+    };
+
+    cancelAnimationFrame(rafRef.current);
+    rafRef.current = requestAnimationFrame(tick);
+
+    audioEl.onended = () => {
+      cancelAnimationFrame(rafRef.current);
+      setActiveChar(-1);
+      setIsKaraoke(false);
+      setStatus('idle');
+      setStatusMsg('');
+    };
+  }, [wordsOnly]);
+
+  const stopKaraoke = useCallback(() => {
+    cancelAnimationFrame(rafRef.current);
+    setActiveChar(-1);
+    setIsKaraoke(false);
+  }, []);
+
+  // ── Cargar speakers + languages ───────────────────────────────────────────
+
   useEffect(() => {
     Promise.all([
       fetch(`${API_BASE}/api/speakers`).then(r => { if (!r.ok) throw new Error(); return r.json(); }),
@@ -176,14 +249,12 @@ export default function App() {
       setCoquiSpeakers(spks);
       setCoquiLanguages(langs);
       setServerOk(true);
-      setMode('coqui');
     }).catch(() => {
       setServerOk(false);
       setMode('webspeech');
     });
   }, []);
 
-  // Cargar voces Web Speech API
   useEffect(() => {
     const load = () => {
       const voices = getWSVoices();
@@ -202,13 +273,11 @@ export default function App() {
 
   const coquiCurrentLang = coquiLanguages.find(l => l.code === coquiLang);
   const coquiCurrentSpeaker = coquiSpeakers.find(s => s.id === coquiSpeaker);
-  const coquiVisible = coquiSpeakers.filter(s => coquiGender === 'all' || s.gender === coquiGender);
   const coquiFemale = coquiSpeakers.filter(s => s.gender === 'F');
   const coquiMale = coquiSpeakers.filter(s => s.gender === 'M');
 
   const wsvLangs = [...new Set(wsvVoices.map(v => v.lang))].sort();
   const wsvFiltered = wsvVoices.filter(v => v.lang === wsvLang && (wsvGender === 'all' || v.gender === wsvGender || v.gender === '?'));
-  const wsvCurrentLang = wsvVoices.find(v => v.lang === wsvLang);
 
   // ── AudioContext (Kokoro) ─────────────────────────────────────────────────
 
@@ -239,8 +308,7 @@ export default function App() {
       switch (msg.type) {
         case 'model_loading': setStatus('loading'); setStatusMsg(msg.message); setDownloadPct(0); break;
         case 'download_progress': {
-          const pct = Math.round(msg.progress);
-          setDownloadPct(pct);
+          setDownloadPct(Math.round(msg.progress));
           setDownloadMB(`${(msg.loaded / 1024 / 1024).toFixed(1)} / ${msg.total > 0 ? (msg.total / 1024 / 1024).toFixed(0) : '?'} MB`);
           break;
         }
@@ -255,13 +323,11 @@ export default function App() {
           setChunksReceived(n);
           const elapsed = (Date.now() - genStartRef.current) / 1000;
           const rate = elapsed > 0 ? n / elapsed : 0;
-          if (rate > 0) {
-            setEstimatedTotal(prev => {
-              const left = Math.max(0, (prev > 0 ? prev : n) - n) / rate;
-              setEta(left < 5 ? 'casi listo...' : left < 60 ? `~${Math.round(left)}s` : `~${Math.floor(left / 60)}m`);
-              return prev;
-            });
-          }
+          if (rate > 0) setEta(prev => {
+            const left = Math.max(0, (estimatedTotal > 0 ? estimatedTotal : n) - n) / rate;
+            return left < 5 ? 'casi listo...' : left < 60 ? `~${Math.round(left)}s` : `~${Math.floor(left / 60)}m`;
+            return prev;
+          });
           if (msg.index === 0) setStatus('playing');
           break;
         }
@@ -269,41 +335,52 @@ export default function App() {
           const blob = mergeToWavBlob(receivedChunksRef.current);
           const url = URL.createObjectURL(blob);
           if (downloadRef.current) URL.revokeObjectURL(downloadRef.current);
-          downloadRef.current = url; setAudioUrl(url); setStatus('idle'); setStatusMsg(''); break;
+          downloadRef.current = url; setAudioUrl(url);
+
+          // Karaoke con el audio completo generado por Kokoro
+          const audio = new Audio(url);
+          audioElRef.current = audio;
+          startTimeKaraoke(audio);
+          audio.play();
+
+          setStatus('playing'); setStatusMsg('');
+          break;
         }
         case 'error': setStatus('idle'); setStatusMsg(''); setError(msg.message); break;
       }
     };
     workerRef.current = worker;
     return () => { worker.terminate(); };
-  }, [playChunk]);
+  }, [playChunk, startTimeKaraoke, estimatedTotal]);
 
   // ── Generar audio ─────────────────────────────────────────────────────────
 
   const generateCoqui = useCallback(async () => {
     abortRef.current?.abort();
     abortRef.current = new AbortController();
-    setStatus('loading'); setError(null); setAudioUrl(null);
+    setStatus('loading'); setError(null); setAudioUrl(null); stopKaraoke();
     setStatusMsg(`${coquiCurrentSpeaker?.name ?? coquiSpeaker} · ${coquiCurrentLang?.name ?? coquiLang}`);
     try {
       const params = new URLSearchParams({ text, speaker: coquiSpeaker, language: coquiLang });
       const res = await fetch(`${API_BASE}/api/tts?${params}`, { signal: abortRef.current.signal });
       if (!res.ok) { const e = await res.json().catch(() => ({ detail: `HTTP ${res.status}` })); throw new Error(e.detail); }
-      setStatus('playing');
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       if (downloadRef.current) URL.revokeObjectURL(downloadRef.current);
       downloadRef.current = url; setAudioUrl(url);
+
       audioElRef.current?.pause();
-      const audio = new Audio(url); audioElRef.current = audio;
-      audio.onended = () => { setStatus('idle'); setStatusMsg(''); };
+      const audio = new Audio(url);
+      audioElRef.current = audio;
+      setStatus('playing');
+      startTimeKaraoke(audio);
       await audio.play();
     } catch (err: unknown) {
       if ((err as Error)?.name === 'AbortError') return;
-      setStatus('idle'); setStatusMsg('');
+      setStatus('idle'); setStatusMsg(''); stopKaraoke();
       setError(`${err instanceof Error ? err.message : String(err)}`);
     }
-  }, [text, coquiSpeaker, coquiLang, coquiCurrentSpeaker, coquiCurrentLang]);
+  }, [text, coquiSpeaker, coquiLang, coquiCurrentSpeaker, coquiCurrentLang, startTimeKaraoke, stopKaraoke]);
 
   const generateWebSpeech = useCallback(() => {
     if (!text.trim()) return;
@@ -313,20 +390,31 @@ export default function App() {
     const utt = new SpeechSynthesisUtterance(text);
     utt.voice = voice.raw; utt.lang = voice.raw.lang;
     setStatus('playing'); setError(null); setAudioUrl(null);
-    utt.onend = () => setStatus('idle');
-    utt.onerror = () => { setStatus('idle'); setError('Error Web Speech API'); };
+    setIsKaraoke(true);
+
+    // Web Speech API: sincronización EXACTA por evento onboundary
+    utt.onboundary = (e: SpeechSynthesisEvent) => {
+      if (e.name === 'word') setActiveChar(e.charIndex);
+    };
+    utt.onend = () => {
+      setStatus('idle');
+      setActiveChar(-1);
+      setIsKaraoke(false);
+    };
+    utt.onerror = () => { setStatus('idle'); setError('Error Web Speech API'); stopKaraoke(); };
     window.speechSynthesis.speak(utt);
-  }, [text, wsvVoice, wsvVoices]);
+  }, [text, wsvVoice, wsvVoices, stopKaraoke]);
 
   const generateKokoro = useCallback(() => {
     if (!text.trim() || !workerRef.current) return;
     setEta(''); setStatus('loading'); setError(null); setStatusMsg('Iniciando...');
     setChunksReceived(0); receivedChunksRef.current = []; setAudioUrl(null); setDownloadPct(0);
     setEstimatedTotal(Math.max(1, Math.ceil(text.length / 120)));
+    stopKaraoke();
     if (audioCtxRef.current) { audioCtxRef.current.close(); audioCtxRef.current = null; }
     nextStartRef.current = 0;
     workerRef.current.postMessage({ type: 'generate', text, voice: kokoroVoice } satisfies WorkerInMessage);
-  }, [text, kokoroVoice]);
+  }, [text, kokoroVoice, stopKaraoke]);
 
   const generate = useCallback(() => {
     if (mode === 'coqui') generateCoqui();
@@ -338,8 +426,9 @@ export default function App() {
     if (mode === 'coqui') { abortRef.current?.abort(); audioElRef.current?.pause(); }
     else if (mode === 'webspeech') window.speechSynthesis.cancel();
     else { workerRef.current?.postMessage({ type: 'cancel' } satisfies WorkerInMessage); audioCtxRef.current?.close(); audioCtxRef.current = null; }
+    stopKaraoke();
     setStatus('idle'); setStatusMsg(''); setChunksReceived(0);
-  }, [mode]);
+  }, [mode, stopKaraoke]);
 
   const handleDownload = () => {
     const url = downloadRef.current || audioUrl;
@@ -352,11 +441,10 @@ export default function App() {
 
   const isActive = status !== 'idle';
 
-  // ── Engine label ──────────────────────────────────────────────────────────
   const engineLabel =
     mode === 'kokoro' ? `Kokoro TTS${deviceInfo ? ` · ${deviceInfo}` : ''}` :
-      mode === 'coqui' ? 'Coqui XTTS v2 · CPU · Local' :
-        `Web Speech API${wsvVoices.length ? ` · ${wsvVoices.length} voces del navegador` : ''}`;
+      mode === 'coqui' ? 'Coqui XTTS v2 · CPU' :
+        `Web Speech API${wsvVoices.length ? ` · ${wsvVoices.length} voces` : ''}`;
 
   return (
     <div className="min-h-screen bg-[#f5f2ed] text-[#1a1a1a] font-sans selection:bg-[#5A5A40]/20">
@@ -372,35 +460,62 @@ export default function App() {
             className="text-4xl md:text-5xl font-serif font-light mb-3 tracking-tight">
             Voice Studio
           </motion.h1>
-          <p className="text-base text-[#1a1a1a]/50 mb-3">Texto a voz · Múltiples idiomas · Open source</p>
-
+          <p className="text-base text-[#1a1a1a]/50 mb-3">Texto a voz · Karaoke · Open source</p>
           <div className="inline-flex items-center gap-2 text-xs text-[#5A5A40]/70 bg-[#5A5A40]/8 px-3 py-1.5 rounded-full">
-            <Cpu className="w-3 h-3" />
-            {engineLabel}
+            <Cpu className="w-3 h-3" />{engineLabel}
           </div>
-
           {serverOk !== null && mode !== 'kokoro' && (
             <div className={`mt-2 inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full ${serverOk ? 'text-green-700 bg-green-50' : 'text-amber-700 bg-amber-50'}`}>
               {serverOk ? <Server className="w-3 h-3" /> : <Wifi className="w-3 h-3" />}
-              {serverOk
-                ? `Coqui XTTS v2 · ${coquiSpeakers.length} hablantes · ${coquiLanguages.length} idiomas`
-                : `Modo Web Speech API (para Coqui: npm run server)`}
+              {serverOk ? `Coqui XTTS v2 · ${coquiSpeakers.length} hablantes · ${coquiLanguages.length} idiomas` : `Web Speech API (para Coqui: npm run server)`}
             </div>
           )}
         </header>
 
         <div className="grid gap-6">
 
+          {/* ── VISTA KARAOKE ─────────────────────────────────────────────── */}
+          <AnimatePresence>
+            {isKaraoke && (
+              <motion.section
+                initial={{ opacity: 0, y: -20, scale: 0.97 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: -20, scale: 0.97 }}
+                transition={{ type: 'spring', stiffness: 300, damping: 30 }}
+                className="bg-white rounded-3xl p-8 shadow-lg border border-black/5 relative overflow-hidden">
+
+                {/* Pulso de fondo animado */}
+                <motion.div
+                  className="absolute inset-0 pointer-events-none"
+                  animate={{ background: ['rgba(90,90,64,0.03)', 'rgba(90,90,64,0.07)', 'rgba(90,90,64,0.03)'] }}
+                  transition={{ duration: 1.5, repeat: Infinity, ease: 'easeInOut' }}
+                />
+
+                <div className="flex items-center gap-2 mb-4 text-[#5A5A40]">
+                  <motion.div
+                    animate={{ scale: [1, 1.2, 1] }}
+                    transition={{ duration: 0.8, repeat: Infinity }}
+                    className="w-2 h-2 rounded-full bg-[#5A5A40]"
+                  />
+                  <span className="text-xs font-semibold uppercase tracking-widest">Reproduciendo</span>
+                </div>
+
+                <div className="text-xl md:text-2xl min-h-[6rem] flex items-center justify-center">
+                  <KaraokeDisplay text={text} activeChar={activeChar} />
+                </div>
+              </motion.section>
+            )}
+          </AnimatePresence>
+
           {/* Engine selector */}
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.2 }}
             className="bg-white rounded-3xl p-2 shadow-sm border border-black/5 flex gap-2 flex-wrap">
             {([
               { id: 'coqui' as TtsMode, label: '🤖 Coqui XTTS v2', sub: '28 voces × 17 idiomas · Local', disabled: serverOk === false },
-              { id: 'webspeech' as TtsMode, label: '🌐 Web Speech API', sub: 'Voces del navegador · Siempre disponible', disabled: false },
+              { id: 'webspeech' as TtsMode, label: '🌐 Web Speech API', sub: 'Voces del navegador · Siempre', disabled: false },
               { id: 'kokoro' as TtsMode, label: '⭐ Kokoro TTS', sub: 'Inglés premium · Streaming', disabled: false },
             ] as { id: TtsMode; label: string; sub: string; disabled: boolean }[]).map(opt => (
-              <button key={opt.id} onClick={() => !opt.disabled && setMode(opt.id)}
-                disabled={opt.disabled}
+              <button key={opt.id} onClick={() => !opt.disabled && setMode(opt.id)} disabled={opt.disabled}
                 className={`flex-1 py-3 px-4 rounded-2xl text-sm transition-all ${mode === opt.id ? 'bg-[#5A5A40] text-white shadow' : opt.disabled ? 'text-[#1a1a1a]/20 cursor-not-allowed' : 'text-[#1a1a1a]/60 hover:text-[#1a1a1a] hover:bg-[#f9f8f6]'}`}>
                 <div className="font-medium">{opt.label}</div>
                 <div className={`text-xs mt-0.5 ${mode === opt.id ? 'text-white/70' : 'text-[#1a1a1a]/40'}`}>{opt.sub}</div>
@@ -420,14 +535,12 @@ export default function App() {
 
               <AnimatePresence mode="wait">
 
-                {/* ── Kokoro ──────────────────────────────────────────────── */}
+                {/* Kokoro */}
                 {mode === 'kokoro' && (
                   <motion.div key="kokoro" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
                     {(['F', 'M'] as const).map(g => (
                       <div key={g} className="mb-4">
-                        <p className="text-xs text-[#1a1a1a]/40 uppercase tracking-wider font-medium mb-2">
-                          {g === 'F' ? '♀ Femeninas' : '♂ Masculinas'}
-                        </p>
+                        <p className="text-xs text-[#1a1a1a]/40 uppercase tracking-wider font-medium mb-2">{g === 'F' ? '♀ Femeninas' : '♂ Masculinas'}</p>
                         <div className="grid grid-cols-2 gap-2">
                           {KOKORO_VOICES.filter(v => v.gender === g).map(v => (
                             <button key={v.id} onClick={() => setKokoroVoice(v.id)}
@@ -442,10 +555,9 @@ export default function App() {
                   </motion.div>
                 )}
 
-                {/* ── Coqui XTTS v2 ───────────────────────────────────────── */}
+                {/* Coqui */}
                 {mode === 'coqui' && (
                   <motion.div key="coqui" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-                    {/* Idioma */}
                     <p className="text-xs text-[#1a1a1a]/40 uppercase tracking-wider font-medium mb-2">Idioma</p>
                     <div className="flex flex-wrap gap-1.5 mb-4">
                       {coquiLanguages.map(lang => (
@@ -455,12 +567,8 @@ export default function App() {
                         </button>
                       ))}
                     </div>
-
-                    {/* Filtro género + grid hablantes */}
                     <div className="flex items-center justify-between mb-2">
-                      <p className="text-xs text-[#1a1a1a]/40 uppercase tracking-wider font-medium">
-                        Hablante ({coquiVisible.length})
-                      </p>
+                      <p className="text-xs text-[#1a1a1a]/40 uppercase tracking-wider font-medium">Hablante</p>
                       <div className="flex gap-1">
                         {(['all', 'F', 'M'] as const).map(g => (
                           <button key={g} onClick={() => setCoquiGender(g)}
@@ -470,7 +578,6 @@ export default function App() {
                         ))}
                       </div>
                     </div>
-
                     <div className="grid grid-cols-3 sm:grid-cols-4 gap-2 max-h-56 overflow-y-auto pr-1">
                       {(coquiGender !== 'M' ? coquiFemale : []).map(sp => (
                         <button key={sp.id} onClick={() => setCoquiSpeaker(sp.id)}
@@ -496,34 +603,27 @@ export default function App() {
                   </motion.div>
                 )}
 
-                {/* ── Web Speech API ───────────────────────────────────────── */}
+                {/* Web Speech API */}
                 {mode === 'webspeech' && (
                   <motion.div key="wsv" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
                     {wsvVoices.length === 0 ? (
                       <p className="text-sm text-[#1a1a1a]/40 text-center py-8">Cargando voces del sistema...</p>
                     ) : (
                       <>
-                        {/* Idioma */}
-                        <p className="text-xs text-[#1a1a1a]/40 uppercase tracking-wider font-medium mb-2">
-                          Idioma ({wsvLangs.length} disponibles)
-                        </p>
+                        <p className="text-xs text-[#1a1a1a]/40 uppercase tracking-wider font-medium mb-2">Idioma ({wsvLangs.length})</p>
                         <div className="flex flex-wrap gap-1.5 mb-4">
                           {wsvLangs.map(lang => {
-                            const v = wsvVoices.find(x => x.lang === lang);
+                            const vv = wsvVoices.find(x => x.lang === lang);
                             return (
                               <button key={lang} onClick={() => { setWsvLang(lang); setWsvVoice(wsvVoices.find(x => x.lang === lang)?.id ?? ''); }}
                                 className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium border transition-all ${wsvLang === lang ? 'bg-[#5A5A40] border-[#5A5A40] text-white' : 'bg-[#f9f8f6] border-black/5 text-[#1a1a1a]/70 hover:border-[#5A5A40]/30'}`}>
-                                <span>{v?.flag ?? '🌐'}</span><span>{v?.langName ?? (lang as string).toUpperCase()}</span>
+                                <span>{vv?.flag ?? '🌐'}</span><span>{vv?.langName ?? (lang as string).toUpperCase()}</span>
                               </button>
                             );
                           })}
                         </div>
-
-                        {/* Filtro + voces */}
                         <div className="flex items-center justify-between mb-2">
-                          <p className="text-xs text-[#1a1a1a]/40 uppercase tracking-wider font-medium">
-                            Voz ({wsvFiltered.length})
-                          </p>
+                          <p className="text-xs text-[#1a1a1a]/40 uppercase tracking-wider font-medium">Voz ({wsvFiltered.length})</p>
                           <div className="flex gap-1">
                             {(['all', 'F', 'M'] as const).map(g => (
                               <button key={g} onClick={() => setWsvGender(g)}
@@ -533,7 +633,6 @@ export default function App() {
                             ))}
                           </div>
                         </div>
-
                         <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
                           {wsvFiltered.map(v => (
                             <button key={v.id} onClick={() => setWsvVoice(v.id)}
@@ -545,14 +644,10 @@ export default function App() {
                             </button>
                           ))}
                           {wsvFiltered.length === 0 && (
-                            <p className="text-xs text-[#1a1a1a]/40 text-center py-4">
-                              No hay voces para este idioma en tu sistema
-                            </p>
+                            <p className="text-xs text-[#1a1a1a]/40 text-center py-4">No hay voces para este idioma en tu sistema</p>
                           )}
                         </div>
-                        <p className="text-xs text-[#1a1a1a]/35 mt-3 italic">
-                          Las voces dependen de las instaladas en macOS/Windows/Linux.
-                        </p>
+                        <p className="text-xs text-[#1a1a1a]/35 mt-3 italic">Las voces dependen del sistema operativo.</p>
                       </>
                     )}
                   </motion.div>
@@ -562,6 +657,7 @@ export default function App() {
 
             {/* ── Texto + Botón ────────────────────────────────────────────── */}
             <div className="md:col-span-2 flex flex-col gap-5">
+
               <motion.section initial={{ opacity: 0, x: 15 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.35 }}
                 className="bg-white rounded-3xl p-6 shadow-sm border border-black/5">
                 <div className="flex items-center gap-2 mb-4 text-[#5A5A40]">
@@ -574,7 +670,6 @@ export default function App() {
                 <div className="mt-1.5 text-right text-xs text-[#1a1a1a]/35">{text.length.toLocaleString()} chars</div>
               </motion.section>
 
-              {/* Botón */}
               <motion.button initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} transition={{ delay: 0.4 }}
                 onClick={isActive ? cancel : generate}
                 disabled={!text.trim() && !isActive}
@@ -587,14 +682,13 @@ export default function App() {
                   <motion.div className="absolute bottom-0 left-0 h-1 bg-white/25"
                     animate={{ width: ['0%', '100%'] }} transition={{ duration: 3, repeat: Infinity, ease: 'linear' }} />
                 )}
-
                 {isActive ? <Loader2 className="w-10 h-10 animate-spin" /> : <Play className="w-10 h-10 fill-current" />}
                 <div className="text-center">
                   <span className="text-base font-serif italic block mb-1">
                     {status === 'idle' && 'Generar Voz'}
                     {status === 'loading' && (statusMsg || 'Cargando...')}
                     {status === 'generating' && 'Generando...'}
-                    {status === 'playing' && '▶ Reproduciendo...'}
+                    {status === 'playing' && '▶ Karaoke activo...'}
                   </span>
                   {mode === 'kokoro' && (status === 'generating' || status === 'playing') && chunksReceived > 0 && (
                     <p className="text-xs text-white/60">{chunksReceived}/{estimatedTotal} frases{eta ? ` · ${eta}` : ''}</p>
@@ -602,12 +696,10 @@ export default function App() {
                   {status === 'loading' && downloadPct > 0 && (
                     <div className="w-full px-2">
                       <div className="flex justify-between text-xs text-white/60 mb-1">
-                        <span className="font-bold">{downloadPct}%</span>
-                        <span>{downloadMB}</span>
+                        <span className="font-bold">{downloadPct}%</span><span>{downloadMB}</span>
                       </div>
                       <div className="w-full bg-white/10 rounded-full h-1.5">
-                        <motion.div className="bg-white/60 h-1.5 rounded-full"
-                          animate={{ width: `${downloadPct}%` }} transition={{ ease: 'easeOut' }} />
+                        <motion.div className="bg-white/60 h-1.5 rounded-full" animate={{ width: `${downloadPct}%` }} />
                       </div>
                     </div>
                   )}
@@ -635,15 +727,15 @@ export default function App() {
                       )}
                     </div>
                   </div>
-                ) : (
+                ) : audioUrl ? (
                   <div>
                     <div className="flex items-center justify-between mb-4">
                       <div>
                         <h3 className="font-serif italic text-lg">Audio Generado</h3>
                         <p className="text-xs text-[#1a1a1a]/40 mt-0.5">
                           {mode === 'coqui' ? `XTTS v2 · ${coquiCurrentSpeaker?.gender === 'F' ? '♀' : '♂'} ${coquiSpeaker} · ${coquiCurrentLang?.flag} ${coquiCurrentLang?.name}` :
-                            mode === 'webspeech' ? `Web Speech API · ${wsvVoices.find(v => v.id === wsvVoice)?.name ?? ''}` :
-                              `Kokoro TTS · ${kokoroVoice}`}
+                            mode === 'webspeech' ? `Web Speech · ${wsvVoices.find(v => v.id === wsvVoice)?.name ?? ''}` :
+                              `Kokoro · ${kokoroVoice}`}
                         </p>
                       </div>
                       {mode !== 'webspeech' && (
@@ -653,9 +745,12 @@ export default function App() {
                         </button>
                       )}
                     </div>
-                    {audioUrl && <audio src={audioUrl} controls className="w-full accent-[#5A5A40]" />}
+                    <audio src={audioUrl} controls className="w-full accent-[#5A5A40]"
+                      onPlay={e => startTimeKaraoke(e.currentTarget)}
+                      onPause={() => { cancelAnimationFrame(rafRef.current); setActiveChar(-1); setIsKaraoke(false); }}
+                      onEnded={() => { cancelAnimationFrame(rafRef.current); setActiveChar(-1); setIsKaraoke(false); }} />
                   </div>
-                )}
+                ) : null}
               </motion.section>
             )}
           </AnimatePresence>
