@@ -1,99 +1,111 @@
 /**
- * Voice Studio — Kokoro TTS (inglés) + Web Speech API (español)
- * Audio progresivo en inglés via AudioContext. Español nativo del navegador.
- * Open Source · Apache 2.0 · Sin API key · Sin límites
+ * Voice Studio
+ * ─ Local (con npm run server): Coqui XTTS v2 — 28 hablantes × 17 idiomas
+ * ─ Deploy (GitHub Pages):     Web Speech API del navegador — voces del sistema
+ * ─ Inglés siempre:            Kokoro TTS — calidad premium (streaming)
  */
 
 import { useState, useRef, useCallback, useEffect } from 'react';
 import type { WorkerOutMessage, WorkerInMessage } from './tts.worker';
 import {
-  Volume2,
-  Play,
-  Square,
-  Loader2,
-  Mic2,
-  Settings2,
-  AlertCircle,
-  Download,
-  Cpu,
-  Globe
+  Volume2, Play, Square, Loader2, Mic2, Settings2,
+  AlertCircle, Download, Cpu, Wifi, Server
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
-// ── Voces inglés (Kokoro TTS) ────────────────────────────────────────────────
-const ENGLISH_VOICES = [
-  { id: 'af_heart', label: 'Heart', description: 'Femenina americana, cálida ⭐', gender: 'F' },
-  { id: 'af_bella', label: 'Bella', description: 'Femenina americana, suave', gender: 'F' },
-  { id: 'af_sarah', label: 'Sarah', description: 'Femenina americana, clara', gender: 'F' },
-  { id: 'af_nicole', label: 'Nicole', description: 'Femenina americana, suave', gender: 'F' },
-  { id: 'af_sky', label: 'Sky', description: 'Femenina americana, ligera', gender: 'F' },
-  { id: 'am_adam', label: 'Adam', description: 'Masculina americana, profunda', gender: 'M' },
-  { id: 'am_michael', label: 'Michael', description: 'Masculina americana, natural', gender: 'M' },
-  { id: 'bf_emma', label: 'Emma', description: 'Femenina británica, elegante', gender: 'F' },
-  { id: 'bf_isabella', label: 'Isabella', description: 'Femenina británica, sofist.', gender: 'F' },
-  { id: 'bm_george', label: 'George', description: 'Masculina británica, profunda', gender: 'M' },
-  { id: 'bm_lewis', label: 'Lewis', description: 'Masculina británica, resonante', gender: 'M' },
-];
+// ── Tipos ─────────────────────────────────────────────────────────────────────
 
-// ── Dialectos disponibles para el selector de acento ────────────────────────
-const ES_DIALECTS = [
-  { lang: 'es-US', label: '🇺🇸 Español (EE.UU.)' },
-  { lang: 'es-MX', label: '🇲🇽 México' },
-  { lang: 'es-CO', label: '🇨🇴 Colombia' },
-  { lang: 'es-AR', label: '🇦🇷 Argentina' },
-  { lang: 'es-CL', label: '🇨🇱 Chile' },
-  { lang: 'es-PE', label: '🇵🇪 Perú' },
-  { lang: 'es-VE', label: '🇻🇪 Venezuela' },
-  { lang: 'es-ES', label: '🇪🇸 España' },
-];
-
-function sortSpanishVoices(voices: SpeechSynthesisVoice[]): SpeechSynthesisVoice[] {
-  // Google voices primero (mejor calidad), luego el resto
-  return [...voices].sort((a, b) => {
-    const ag = a.name.toLowerCase().includes('google') ? 0 : 1;
-    const bg = b.name.toLowerCase().includes('google') ? 0 : 1;
-    return ag - bg;
-  });
+interface XttsSpeaker {
+  id: string;
+  name: string;
+  gender: 'F' | 'M';
 }
 
-function getDialectLabel(lang: string): string {
-  const map: Record<string, string> = {
-    'es-MX': '🇲🇽 México',
-    'es-CO': '🇨🇴 Colombia',
-    'es-AR': '🇦🇷 Argentina',
-    'es-US': '🇺🇸 Español US',
-    'es-CL': '🇨🇱 Chile',
-    'es-PE': '🇵🇪 Perú',
-    'es-VE': '🇻🇪 Venezuela',
-    'es-ES': '🇪🇸 España',
-  };
-  for (const [key, label] of Object.entries(map)) {
-    if (lang.startsWith(key)) return label;
-  }
-  return `🌎 ${lang}`;
+interface XttsLanguage {
+  code: string;
+  name: string;
+  flag: string;
 }
 
-// ── WAV encoder (para download — solo inglés) ─────────────────────────────────
+interface WSSVoice {
+  id: string;
+  name: string;
+  lang: string;
+  gender: 'F' | 'M' | '?';
+  flag: string;
+  langName: string;
+  raw: SpeechSynthesisVoice;
+}
+
+type TtsMode = 'kokoro' | 'coqui' | 'webspeech';
+
+// ── Utilidades Web Speech API ─────────────────────────────────────────────────
+
+const LANG_FLAGS: Record<string, string> = {
+  es: '🌎', en: '🇺🇸', fr: '🇫🇷', de: '🇩🇪', it: '🇮🇹',
+  pt: '🇧🇷', pl: '🇵🇱', tr: '🇹🇷', ru: '🇷🇺', nl: '🇳🇱',
+  cs: '🇨🇿', ar: '🇸🇦', zh: '🇨🇳', ja: '🇯🇵', ko: '🇰🇷',
+  hi: '🇮🇳', hu: '🇭🇺',
+};
+const LANG_NAMES: Record<string, string> = {
+  es: 'Español', en: 'English', fr: 'Français', de: 'Deutsch', it: 'Italiano',
+  pt: 'Português', pl: 'Polski', tr: 'Türkçe', ru: 'Русский', nl: 'Nederlands',
+  cs: 'Čeština', ar: 'العربية', zh: 'Chinese', ja: '日本語', ko: '한국어',
+  hi: 'हिंदी', hu: 'Magyar',
+};
+
+function getWSVoices(): WSSVoice[] {
+  const voices = window.speechSynthesis.getVoices();
+  const seen = new Set<string>();
+  return voices
+    .filter(v => !seen.has(v.voiceURI) && seen.add(v.voiceURI))
+    .map(v => {
+      const langCode = v.lang.split('-')[0].toLowerCase();
+      const nameLower = v.name.toLowerCase();
+      const gender: 'F' | 'M' | '?' =
+        /female|mujer|femme|frau|donna|mulher|kvinna|femenin|girl|woman/i.test(nameLower) ? 'F' :
+          /male|hombre|homme|mann|uomo|homem|man/i.test(nameLower) ? 'M' : '?';
+      return {
+        id: v.voiceURI,
+        name: v.name,
+        lang: langCode,
+        gender,
+        flag: LANG_FLAGS[langCode] ?? '🌐',
+        langName: LANG_NAMES[langCode] ?? langCode.toUpperCase(),
+        raw: v,
+      };
+    });
+}
+
+// ── Kokoro voices ─────────────────────────────────────────────────────────────
+
+const KOKORO_VOICES = [
+  { id: 'af_heart', label: 'Heart', description: 'Americana · warm ⭐', gender: 'F' },
+  { id: 'af_bella', label: 'Bella', description: 'Americana · soft', gender: 'F' },
+  { id: 'af_sarah', label: 'Sarah', description: 'Americana · clear', gender: 'F' },
+  { id: 'af_nicole', label: 'Nicole', description: 'Americana · soft', gender: 'F' },
+  { id: 'am_adam', label: 'Adam', description: 'Americano · deep', gender: 'M' },
+  { id: 'am_michael', label: 'Michael', description: 'Americano · natural', gender: 'M' },
+  { id: 'bf_emma', label: 'Emma', description: 'Británica · elegant', gender: 'F' },
+  { id: 'bm_george', label: 'George', description: 'Británico · deep', gender: 'M' },
+];
+
+// ── WAV encoder ───────────────────────────────────────────────────────────────
+
 function mergeToWavBlob(chunks: { audio: Float32Array; sampleRate: number }[]): Blob {
-  if (chunks.length === 0) return new Blob([], { type: 'audio/wav' });
-  const sampleRate = chunks[0].sampleRate;
-  const totalLen = chunks.reduce((s, c) => s + c.audio.length, 0);
-  const merged = new Float32Array(totalLen);
-  let offset = 0;
-  for (const c of chunks) { merged.set(c.audio, offset); offset += c.audio.length; }
-
-  const bpp = 2, ch = 1;
-  const dataSize = merged.length * bpp;
-  const buf = new ArrayBuffer(44 + dataSize);
-  const v = new DataView(buf);
-  let p = 0;
-  const wS = (s: string) => { for (let i = 0; i < s.length; i++) v.setUint8(p++, s.charCodeAt(i)); };
+  if (!chunks.length) return new Blob([], { type: 'audio/wav' });
+  const sr = chunks[0].sampleRate;
+  const merged = new Float32Array(chunks.reduce((s, c) => s + c.audio.length, 0));
+  let off = 0;
+  for (const c of chunks) { merged.set(c.audio, off); off += c.audio.length; }
+  const ds = merged.length * 2;
+  const buf = new ArrayBuffer(44 + ds); const v = new DataView(buf); let p = 0;
+  const wS = (s: string) => { for (const c of s) v.setUint8(p++, c.charCodeAt(0)); };
   const w32 = (d: number) => { v.setUint32(p, d, true); p += 4; };
   const w16 = (d: number) => { v.setUint16(p, d, true); p += 2; };
-  wS('RIFF'); w32(36 + dataSize); wS('WAVE');
-  wS('fmt '); w32(16); w16(1); w16(ch);
-  w32(sampleRate); w32(sampleRate * ch * bpp); w16(ch * bpp); w16(16);
-  wS('data'); w32(dataSize);
+  wS('RIFF'); w32(36 + ds); wS('WAVE');
+  wS('fmt '); w32(16); w16(1); w16(1); w32(sr); w32(sr * 2); w16(2); w16(16);
+  wS('data'); w32(ds);
   for (let i = 0; i < merged.length; i++) {
     const s = Math.max(-1, Math.min(1, merged[i]));
     v.setInt16(p, s < 0 ? s * 0x8000 : s * 0x7fff, true); p += 2;
@@ -101,19 +113,33 @@ function mergeToWavBlob(chunks: { audio: Float32Array; sampleRate: number }[]): 
   return new Blob([buf], { type: 'audio/wav' });
 }
 
+// ── App ───────────────────────────────────────────────────────────────────────
+
 export default function App() {
   const [text, setText] = useState(
-    'Welcome to Voice Studio! This app converts your text into natural-sounding speech using open-source AI models that run entirely in your browser — no API key needed, completely free and unlimited.'
+    'Hola, bienvenida a Voice Studio. Esta aplicación convierte texto en voz natural con múltiples voces e idiomas.'
   );
-  const [language, setLanguage] = useState<'en' | 'es'>('en');
-  const [selectedVoice, setSelectedVoice] = useState('af_heart');
 
-  // Voces en español detectadas del sistema
-  const [spanishVoices, setSpanishVoices] = useState<SpeechSynthesisVoice[]>([]);
-  const [selectedSpanishVoice, setSelectedSpanishVoice] = useState<string>('');
-  // Dialecto (lang) independiente de la voz seleccionada
-  const [spanishDialect, setSpanishDialect] = useState<string>('es-US');
+  const [mode, setMode] = useState<TtsMode>('coqui');
 
+  // Coqui state
+  const [coquiSpeakers, setCoquiSpeakers] = useState<XttsSpeaker[]>([]);
+  const [coquiLanguages, setCoquiLanguages] = useState<XttsLanguage[]>([]);
+  const [coquiLang, setCoquiLang] = useState('es');
+  const [coquiSpeaker, setCoquiSpeaker] = useState('Claribel Dervla');
+  const [coquiGender, setCoquiGender] = useState<'all' | 'F' | 'M'>('all');
+  const [serverOk, setServerOk] = useState<boolean | null>(null);
+
+  // Web Speech API state
+  const [wsvVoices, setWsvVoices] = useState<WSSVoice[]>([]);
+  const [wsvLang, setWsvLang] = useState('es');
+  const [wsvVoice, setWsvVoice] = useState('');
+  const [wsvGender, setWsvGender] = useState<'all' | 'F' | 'M'>('all');
+
+  // Kokoro state
+  const [kokoroVoice, setKokoroVoice] = useState('af_heart');
+
+  // General
   const [status, setStatus] = useState<'idle' | 'loading' | 'generating' | 'playing'>('idle');
   const [statusMsg, setStatusMsg] = useState('');
   const [chunksReceived, setChunksReceived] = useState(0);
@@ -131,88 +157,92 @@ export default function App() {
   const receivedChunksRef = useRef<{ audio: Float32Array; sampleRate: number }[]>([]);
   const downloadRef = useRef<string | null>(null);
   const genStartRef = useRef<number>(0);
-  const genRateRef = useRef<number>(0);
+  const abortRef = useRef<AbortController | null>(null);
+  const audioElRef = useRef<HTMLAudioElement | null>(null);
 
-  // ── Detectar voces en español del sistema ────────────────────────────────
+  // ── Inicialización ────────────────────────────────────────────────────────
+
+  // Intentar conectar con servidor Coqui; si falla, usar Web Speech API
   useEffect(() => {
-    const loadVoices = () => {
-      const all = window.speechSynthesis.getVoices();
-      const esVoices = sortSpanishVoices(all.filter(v => v.lang.startsWith('es')));
-      setSpanishVoices(esVoices);
-      if (esVoices.length > 0 && !selectedSpanishVoice) {
-        setSelectedSpanishVoice(esVoices[0].name);
-      }
-    };
-
-    loadVoices();
-    // En Chrome, las voces se cargan de forma asíncrona
-    window.speechSynthesis.onvoiceschanged = loadVoices;
-    return () => { window.speechSynthesis.onvoiceschanged = null; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    Promise.all([
+      fetch('/api/speakers').then(r => { if (!r.ok) throw new Error(); return r.json(); }),
+      fetch('/api/languages').then(r => { if (!r.ok) throw new Error(); return r.json(); }),
+    ]).then(([spks, langs]: [XttsSpeaker[], XttsLanguage[]]) => {
+      setCoquiSpeakers(spks);
+      setCoquiLanguages(langs);
+      setServerOk(true);
+      setMode('coqui');
+    }).catch(() => {
+      setServerOk(false);
+      setMode('webspeech');
+    });
   }, []);
 
-  // Inicializar AudioContext (lazy)
+  // Cargar voces Web Speech API
+  useEffect(() => {
+    const load = () => {
+      const voices = getWSVoices();
+      if (voices.length > 0) {
+        setWsvVoices(voices);
+        const firstEs = voices.find(v => v.lang === 'es');
+        if (firstEs) setWsvVoice(firstEs.id);
+      }
+    };
+    load();
+    window.speechSynthesis.onvoiceschanged = load;
+    return () => { window.speechSynthesis.onvoiceschanged = null; };
+  }, []);
+
+  // ── Derived ───────────────────────────────────────────────────────────────
+
+  const coquiCurrentLang = coquiLanguages.find(l => l.code === coquiLang);
+  const coquiCurrentSpeaker = coquiSpeakers.find(s => s.id === coquiSpeaker);
+  const coquiVisible = coquiSpeakers.filter(s => coquiGender === 'all' || s.gender === coquiGender);
+  const coquiFemale = coquiSpeakers.filter(s => s.gender === 'F');
+  const coquiMale = coquiSpeakers.filter(s => s.gender === 'M');
+
+  const wsvLangs = [...new Set(wsvVoices.map(v => v.lang))].sort();
+  const wsvFiltered = wsvVoices.filter(v => v.lang === wsvLang && (wsvGender === 'all' || v.gender === wsvGender || v.gender === '?'));
+  const wsvCurrentLang = wsvVoices.find(v => v.lang === wsvLang);
+
+  // ── AudioContext (Kokoro) ─────────────────────────────────────────────────
+
   const getAudioCtx = useCallback(() => {
     if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
-      audioCtxRef.current = new AudioContext();
-      nextStartRef.current = 0;
+      audioCtxRef.current = new AudioContext(); nextStartRef.current = 0;
     }
-    if (audioCtxRef.current.state === 'suspended') {
-      audioCtxRef.current.resume();
-    }
+    if (audioCtxRef.current.state === 'suspended') audioCtxRef.current.resume();
     return audioCtxRef.current;
   }, []);
 
-  // Reproducir chunk de audio (para inglés/Kokoro)
   const playChunk = useCallback((samples: Float32Array, sampleRate: number) => {
     const ctx = getAudioCtx();
     const buffer = ctx.createBuffer(1, samples.length, sampleRate);
     buffer.copyToChannel(samples, 0);
     const src = ctx.createBufferSource();
-    src.buffer = buffer;
-    src.connect(ctx.destination);
-    const now = ctx.currentTime;
-    const start = Math.max(nextStartRef.current, now + 0.02);
-    src.start(start);
-    nextStartRef.current = start + buffer.duration;
+    src.buffer = buffer; src.connect(ctx.destination);
+    const start = Math.max(nextStartRef.current, ctx.currentTime + 0.02);
+    src.start(start); nextStartRef.current = start + buffer.duration;
   }, [getAudioCtx]);
 
-  // Web Worker (solo inglés)
-  useEffect(() => {
-    const worker = new Worker(
-      new URL('./tts.worker.ts', import.meta.url),
-      { type: 'module' }
-    );
+  // ── Worker (Kokoro) ───────────────────────────────────────────────────────
 
+  useEffect(() => {
+    const worker = new Worker(new URL('./tts.worker.ts', import.meta.url), { type: 'module' });
     worker.onmessage = (event: MessageEvent<WorkerOutMessage>) => {
       const msg = event.data;
-
       switch (msg.type) {
-        case 'model_loading':
-          setStatus('loading');
-          setStatusMsg(msg.message);
-          setDownloadPct(0);
-          setDownloadMB('');
-          break;
-
+        case 'model_loading': setStatus('loading'); setStatusMsg(msg.message); setDownloadPct(0); break;
         case 'download_progress': {
           const pct = Math.round(msg.progress);
-          const loadedMB = (msg.loaded / 1024 / 1024).toFixed(1);
-          const totalMB = msg.total > 0 ? (msg.total / 1024 / 1024).toFixed(0) : '?';
           setDownloadPct(pct);
-          setDownloadMB(`${loadedMB} / ${totalMB} MB`);
+          setDownloadMB(`${(msg.loaded / 1024 / 1024).toFixed(1)} / ${msg.total > 0 ? (msg.total / 1024 / 1024).toFixed(0) : '?'} MB`);
           break;
         }
-
         case 'model_ready':
-          setDeviceInfo(msg.device === 'webgpu' ? '⚡ GPU activa' : '🖥 CPU (WASM)');
-          setStatus('generating');
-          setStatusMsg('');
-          setDownloadPct(0);
-          setDownloadMB('');
-          genStartRef.current = Date.now();
-          break;
-
+          setDeviceInfo(msg.device === 'webgpu' ? '⚡ GPU' : '🖥 CPU');
+          setStatus('generating'); setStatusMsg(''); setDownloadPct(0);
+          genStartRef.current = Date.now(); break;
         case 'chunk': {
           playChunk(msg.audio, msg.sampleRate);
           receivedChunksRef.current.push({ audio: msg.audio, sampleRate: msg.sampleRate });
@@ -220,296 +250,303 @@ export default function App() {
           setChunksReceived(n);
           const elapsed = (Date.now() - genStartRef.current) / 1000;
           const rate = elapsed > 0 ? n / elapsed : 0;
-          genRateRef.current = rate;
           if (rate > 0) {
             setEstimatedTotal(prev => {
-              const total = prev > 0 ? prev : n;
-              const remaining = Math.max(0, total - n);
-              const secsLeft = remaining / rate;
-              if (secsLeft < 5) {
-                setEta('casi listo...');
-              } else {
-                const m = Math.floor(secsLeft / 60);
-                const s = Math.round(secsLeft % 60);
-                setEta(m > 0 ? `~${m} min ${s} seg restantes` : `~${s} seg restantes`);
-              }
+              const left = Math.max(0, (prev > 0 ? prev : n) - n) / rate;
+              setEta(left < 5 ? 'casi listo...' : left < 60 ? `~${Math.round(left)}s` : `~${Math.floor(left / 60)}m`);
               return prev;
             });
           }
           if (msg.index === 0) setStatus('playing');
           break;
         }
-
         case 'done': {
           const blob = mergeToWavBlob(receivedChunksRef.current);
           const url = URL.createObjectURL(blob);
           if (downloadRef.current) URL.revokeObjectURL(downloadRef.current);
-          downloadRef.current = url;
-          setAudioUrl(url);
-          setStatus('idle');
-          setStatusMsg('');
-          break;
+          downloadRef.current = url; setAudioUrl(url); setStatus('idle'); setStatusMsg(''); break;
         }
-
-        case 'error':
-          setStatus('idle');
-          setStatusMsg('');
-          setError(msg.message);
-          break;
+        case 'error': setStatus('idle'); setStatusMsg(''); setError(msg.message); break;
       }
     };
-
     workerRef.current = worker;
     return () => { worker.terminate(); };
   }, [playChunk]);
 
-  // ── Generar voz en español con Web Speech API ────────────────────────────
-  const generateSpanish = useCallback(() => {
+  // ── Generar audio ─────────────────────────────────────────────────────────
+
+  const generateCoqui = useCallback(async () => {
+    abortRef.current?.abort();
+    abortRef.current = new AbortController();
+    setStatus('loading'); setError(null); setAudioUrl(null);
+    setStatusMsg(`${coquiCurrentSpeaker?.name ?? coquiSpeaker} · ${coquiCurrentLang?.name ?? coquiLang}`);
+    try {
+      const params = new URLSearchParams({ text, speaker: coquiSpeaker, language: coquiLang });
+      const res = await fetch(`/api/tts?${params}`, { signal: abortRef.current.signal });
+      if (!res.ok) { const e = await res.json().catch(() => ({ detail: `HTTP ${res.status}` })); throw new Error(e.detail); }
+      setStatus('playing');
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      if (downloadRef.current) URL.revokeObjectURL(downloadRef.current);
+      downloadRef.current = url; setAudioUrl(url);
+      audioElRef.current?.pause();
+      const audio = new Audio(url); audioElRef.current = audio;
+      audio.onended = () => { setStatus('idle'); setStatusMsg(''); };
+      await audio.play();
+    } catch (err: unknown) {
+      if ((err as Error)?.name === 'AbortError') return;
+      setStatus('idle'); setStatusMsg('');
+      setError(`${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [text, coquiSpeaker, coquiLang, coquiCurrentSpeaker, coquiCurrentLang]);
+
+  const generateWebSpeech = useCallback(() => {
     if (!text.trim()) return;
-
-    // Cancelar síntesis anterior si existe
     window.speechSynthesis.cancel();
+    const voice = wsvVoices.find(v => v.id === wsvVoice);
+    if (!voice) { setError('Selecciona una voz'); return; }
+    const utt = new SpeechSynthesisUtterance(text);
+    utt.voice = voice.raw; utt.lang = voice.raw.lang;
+    setStatus('playing'); setError(null); setAudioUrl(null);
+    utt.onend = () => setStatus('idle');
+    utt.onerror = () => { setStatus('idle'); setError('Error Web Speech API'); };
+    window.speechSynthesis.speak(utt);
+  }, [text, wsvVoice, wsvVoices]);
 
-    setStatus('playing');
-    setError(null);
-    setAudioUrl(null);
-    setChunksReceived(0);
-
-    const utterance = new SpeechSynthesisUtterance(text);
-    // Usamos el dialecto seleccionado (acento) independiente de la voz (calidad)
-    utterance.lang = spanishDialect;
-    utterance.rate = 0.95;
-    utterance.pitch = 1.0;
-
-    // Asignar la voz seleccionada
-    if (selectedSpanishVoice) {
-      const voice = spanishVoices.find(v => v.name === selectedSpanishVoice);
-      if (voice) utterance.voice = voice;
-    }
-
-    utterance.onstart = () => {
-      setStatusMsg('Reproduciendo...');
-    };
-
-    utterance.onend = () => {
-      setStatus('idle');
-      setStatusMsg('');
-    };
-
-    utterance.onerror = (e) => {
-      if (e.error === 'interrupted' || e.error === 'canceled') return;
-      setStatus('idle');
-      setStatusMsg('');
-      setError(`Error de síntesis: ${e.error}`);
-    };
-
-    window.speechSynthesis.speak(utterance);
-  }, [text, selectedSpanishVoice, spanishVoices, spanishDialect]);
-
-  const generateSpeech = useCallback(() => {
-    if (language === 'es') {
-      generateSpanish();
-      return;
-    }
-
+  const generateKokoro = useCallback(() => {
     if (!text.trim() || !workerRef.current) return;
-
-    const est = Math.max(1, Math.ceil(text.length / 120));
-    setEstimatedTotal(est);
-    setEta('');
-    setStatus('loading');
-    setError(null);
-    setStatusMsg('Iniciando...');
-    setChunksReceived(0);
-    receivedChunksRef.current = [];
-    setAudioUrl(null);
-
-    if (audioCtxRef.current) {
-      audioCtxRef.current.close();
-      audioCtxRef.current = null;
-    }
+    setEta(''); setStatus('loading'); setError(null); setStatusMsg('Iniciando...');
+    setChunksReceived(0); receivedChunksRef.current = []; setAudioUrl(null); setDownloadPct(0);
+    setEstimatedTotal(Math.max(1, Math.ceil(text.length / 120)));
+    if (audioCtxRef.current) { audioCtxRef.current.close(); audioCtxRef.current = null; }
     nextStartRef.current = 0;
+    workerRef.current.postMessage({ type: 'generate', text, voice: kokoroVoice } satisfies WorkerInMessage);
+  }, [text, kokoroVoice]);
 
-    const msg: WorkerInMessage = { type: 'generate', text, voice: selectedVoice };
-    workerRef.current.postMessage(msg);
-  }, [text, language, selectedVoice, generateSpanish]);
+  const generate = useCallback(() => {
+    if (mode === 'coqui') generateCoqui();
+    else if (mode === 'webspeech') generateWebSpeech();
+    else generateKokoro();
+  }, [mode, generateCoqui, generateWebSpeech, generateKokoro]);
 
-  const cancelGeneration = useCallback(() => {
-    if (language === 'es') {
-      window.speechSynthesis.cancel();
-      setStatus('idle');
-      setStatusMsg('');
-      return;
-    }
-    workerRef.current?.postMessage({ type: 'cancel' } satisfies WorkerInMessage);
-    if (audioCtxRef.current) {
-      audioCtxRef.current.close();
-      audioCtxRef.current = null;
-    }
-    setStatus('idle');
-    setStatusMsg('');
-    setChunksReceived(0);
-  }, [language]);
+  const cancel = useCallback(() => {
+    if (mode === 'coqui') { abortRef.current?.abort(); audioElRef.current?.pause(); }
+    else if (mode === 'webspeech') window.speechSynthesis.cancel();
+    else { workerRef.current?.postMessage({ type: 'cancel' } satisfies WorkerInMessage); audioCtxRef.current?.close(); audioCtxRef.current = null; }
+    setStatus('idle'); setStatusMsg(''); setChunksReceived(0);
+  }, [mode]);
 
   const handleDownload = () => {
     const url = downloadRef.current || audioUrl;
     if (!url) return;
+    const label = mode === 'kokoro' ? kokoroVoice : mode === 'coqui' ? `${coquiSpeaker}_${coquiLang}` : wsvVoice;
     const a = document.createElement('a');
-    a.href = url;
-    a.download = `voice-studio-${selectedVoice}-${Date.now()}.wav`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    a.href = url; a.download = `voice-studio-${label}-${Date.now()}.wav`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
   };
 
   const isActive = status !== 'idle';
-  const femaleVoices = ENGLISH_VOICES.filter(v => v.gender === 'F');
-  const maleVoices = ENGLISH_VOICES.filter(v => v.gender === 'M');
-  const femaleSpanish = spanishVoices.filter(v => v.name.toLowerCase().includes('female') || v.name.toLowerCase().includes('mujer') || /[^a-z](f|femenin)/i.test(v.name) || v.gender === 'female');
-  const maleSpanish = spanishVoices.filter(v => !femaleSpanish.includes(v));
+
+  // ── Engine label ──────────────────────────────────────────────────────────
+  const engineLabel =
+    mode === 'kokoro' ? `Kokoro TTS${deviceInfo ? ` · ${deviceInfo}` : ''}` :
+      mode === 'coqui' ? 'Coqui XTTS v2 · CPU · Local' :
+        `Web Speech API${wsvVoices.length ? ` · ${wsvVoices.length} voces del navegador` : ''}`;
 
   return (
     <div className="min-h-screen bg-[#f5f2ed] text-[#1a1a1a] font-sans selection:bg-[#5A5A40]/20">
-      <div className="max-w-4xl mx-auto px-6 py-12 md:py-20">
+      <div className="max-w-5xl mx-auto px-5 py-12">
 
         {/* Header */}
-        <header className="mb-12 text-center">
+        <header className="mb-10 text-center">
           <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}
-            className="inline-flex items-center justify-center p-3 bg-white rounded-2xl shadow-sm border border-black/5 mb-6">
-            <Volume2 className="w-8 h-8 text-[#5A5A40]" />
+            className="inline-flex items-center justify-center p-3 bg-white rounded-2xl shadow-sm border border-black/5 mb-5">
+            <Volume2 className="w-7 h-7 text-[#5A5A40]" />
           </motion.div>
-          <motion.h1 initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }}
-            className="text-4xl md:text-5xl font-serif font-light mb-4 tracking-tight">
+          <motion.h1 initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }}
+            className="text-4xl md:text-5xl font-serif font-light mb-3 tracking-tight">
             Voice Studio
           </motion.h1>
-          <motion.p initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }}
-            className="text-lg text-[#1a1a1a]/60 max-w-xl mx-auto">
-            Síntesis de voz natural con IA open-source.
-            Sin límites, sin API key — corre en tu dispositivo.
-          </motion.p>
-          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.3 }}
-            className="mt-3 inline-flex items-center gap-2 text-xs text-[#5A5A40]/70 bg-[#5A5A40]/8 px-3 py-1.5 rounded-full">
+          <p className="text-base text-[#1a1a1a]/50 mb-3">Texto a voz · Múltiples idiomas · Open source</p>
+
+          <div className="inline-flex items-center gap-2 text-xs text-[#5A5A40]/70 bg-[#5A5A40]/8 px-3 py-1.5 rounded-full">
             <Cpu className="w-3 h-3" />
-            {language === 'en' ? 'Kokoro TTS · Apache 2.0' : `Web Speech API · ${spanishVoices.length} voces detectadas`}
-            {deviceInfo && language === 'en' && <span className="font-medium text-[#5A5A40]">· {deviceInfo}</span>}
-          </motion.div>
+            {engineLabel}
+          </div>
+
+          {serverOk !== null && mode !== 'kokoro' && (
+            <div className={`mt-2 inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full ${serverOk ? 'text-green-700 bg-green-50' : 'text-amber-700 bg-amber-50'}`}>
+              {serverOk ? <Server className="w-3 h-3" /> : <Wifi className="w-3 h-3" />}
+              {serverOk
+                ? `Coqui XTTS v2 · ${coquiSpeakers.length} hablantes · ${coquiLanguages.length} idiomas`
+                : `Modo Web Speech API (para Coqui: npm run server)`}
+            </div>
+          )}
         </header>
 
-        <main className="grid gap-8">
+        <div className="grid gap-6">
 
-          {/* Idioma */}
-          <motion.section initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.25 }}
-            className="bg-white rounded-[32px] p-6 shadow-sm border border-black/5">
-            <div className="flex items-center gap-2 mb-4 text-[#5A5A40]">
-              <Globe className="w-5 h-5" />
-              <h2 className="text-sm font-semibold uppercase tracking-widest">Idioma</h2>
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              {([
-                { id: 'en', flag: '🇺🇸', label: 'English', sub: 'Kokoro TTS · Grado A · Streaming' },
-                { id: 'es', flag: '🌎', label: 'Español Latino', sub: `Web Speech API · ${spanishVoices.length} voces` },
-              ] as const).map(({ id, flag, label, sub }) => (
-                <button key={id} onClick={() => setLanguage(id)}
-                  className={`flex flex-col items-start p-4 rounded-2xl border transition-all text-left ${language === id ? 'bg-[#5A5A40] border-[#5A5A40] text-white shadow-md' : 'bg-[#f9f8f6] border-black/5 text-[#1a1a1a] hover:border-[#5A5A40]/30'}`}>
-                  <span className="font-medium">{flag} {label}</span>
-                  <span className={`text-xs mt-1 ${language === id ? 'text-white/70' : 'text-[#1a1a1a]/50'}`}>{sub}</span>
-                </button>
-              ))}
-            </div>
-          </motion.section>
+          {/* Engine selector */}
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.2 }}
+            className="bg-white rounded-3xl p-2 shadow-sm border border-black/5 flex gap-2 flex-wrap">
+            {([
+              { id: 'coqui' as TtsMode, label: '🤖 Coqui XTTS v2', sub: '28 voces × 17 idiomas · Local', disabled: serverOk === false },
+              { id: 'webspeech' as TtsMode, label: '🌐 Web Speech API', sub: 'Voces del navegador · Siempre disponible', disabled: false },
+              { id: 'kokoro' as TtsMode, label: '⭐ Kokoro TTS', sub: 'Inglés premium · Streaming', disabled: false },
+            ] as { id: TtsMode; label: string; sub: string; disabled: boolean }[]).map(opt => (
+              <button key={opt.id} onClick={() => !opt.disabled && setMode(opt.id)}
+                disabled={opt.disabled}
+                className={`flex-1 py-3 px-4 rounded-2xl text-sm transition-all ${mode === opt.id ? 'bg-[#5A5A40] text-white shadow' : opt.disabled ? 'text-[#1a1a1a]/20 cursor-not-allowed' : 'text-[#1a1a1a]/60 hover:text-[#1a1a1a] hover:bg-[#f9f8f6]'}`}>
+                <div className="font-medium">{opt.label}</div>
+                <div className={`text-xs mt-0.5 ${mode === opt.id ? 'text-white/70' : 'text-[#1a1a1a]/40'}`}>{opt.sub}</div>
+              </button>
+            ))}
+          </motion.div>
 
-          {/* Texto */}
-          <motion.section initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} transition={{ delay: 0.3 }}
-            className="bg-white rounded-[32px] p-8 shadow-sm border border-black/5">
-            <div className="flex items-center gap-2 mb-4 text-[#5A5A40]">
-              <Mic2 className="w-5 h-5" />
-              <h2 className="text-sm font-semibold uppercase tracking-widest">Texto</h2>
-            </div>
-            <textarea value={text} onChange={(e) => setText(e.target.value)}
-              placeholder={language === 'es' ? 'Escribe el texto en español...' : 'Enter the English text...'}
-              className="w-full h-48 p-4 bg-[#f9f8f6] rounded-2xl border border-black/5 focus:outline-none focus:ring-2 focus:ring-[#5A5A40]/20 transition-all resize-none text-lg leading-relaxed" />
-            <div className="mt-2 text-right text-xs text-[#1a1a1a]/40">
-              {text.length.toLocaleString()} caracteres
-            </div>
-          </motion.section>
+          <div className="grid md:grid-cols-5 gap-6">
 
-          {/* Controles */}
-          <div className="grid md:grid-cols-3 gap-8">
-            <motion.section initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.4 }}
-              className="md:col-span-2 bg-white rounded-[32px] p-8 shadow-sm border border-black/5">
-              <div className="flex items-center gap-2 mb-6 text-[#5A5A40]">
-                <Settings2 className="w-5 h-5" />
-                <h2 className="text-sm font-semibold uppercase tracking-widest">Seleccionar Voz</h2>
+            {/* ── Panel de voces ─────────────────────────────────────────── */}
+            <motion.section initial={{ opacity: 0, x: -15 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.3 }}
+              className="md:col-span-3 bg-white rounded-3xl p-6 shadow-sm border border-black/5">
+              <div className="flex items-center gap-2 mb-5 text-[#5A5A40]">
+                <Settings2 className="w-4 h-4" />
+                <h2 className="text-sm font-semibold uppercase tracking-widest">Voz</h2>
               </div>
+
               <AnimatePresence mode="wait">
-                {language === 'en' ? (
-                  <motion.div key="en" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-                    <p className="text-xs font-medium text-[#1a1a1a]/40 uppercase tracking-wider mb-3">Femeninas</p>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-5">
-                      {femaleVoices.map(v => (
-                        <button key={v.id} onClick={() => setSelectedVoice(v.id)}
-                          className={`flex flex-col items-start p-4 rounded-2xl border transition-all text-left ${selectedVoice === v.id ? 'bg-[#5A5A40] border-[#5A5A40] text-white shadow-md' : 'bg-[#f9f8f6] border-black/5 text-[#1a1a1a] hover:border-[#5A5A40]/30'}`}>
-                          <span className="font-medium mb-1">{v.label}</span>
-                          <span className={`text-xs ${selectedVoice === v.id ? 'text-white/70' : 'text-[#1a1a1a]/50'}`}>{v.description}</span>
-                        </button>
-                      ))}
-                    </div>
-                    <p className="text-xs font-medium text-[#1a1a1a]/40 uppercase tracking-wider mb-3">Masculinas</p>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      {maleVoices.map(v => (
-                        <button key={v.id} onClick={() => setSelectedVoice(v.id)}
-                          className={`flex flex-col items-start p-4 rounded-2xl border transition-all text-left ${selectedVoice === v.id ? 'bg-[#5A5A40] border-[#5A5A40] text-white shadow-md' : 'bg-[#f9f8f6] border-black/5 text-[#1a1a1a] hover:border-[#5A5A40]/30'}`}>
-                          <span className="font-medium mb-1">{v.label}</span>
-                          <span className={`text-xs ${selectedVoice === v.id ? 'text-white/70' : 'text-[#1a1a1a]/50'}`}>{v.description}</span>
-                        </button>
-                      ))}
-                    </div>
-                  </motion.div>
-                ) : (
-                  <motion.div key="es" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-                    {spanishVoices.length === 0 ? (
-                      <div className="text-center py-8 text-[#1a1a1a]/40">
-                        <p className="text-sm">No se detectaron voces en español.</p>
-                        <p className="text-xs mt-1">Instala voces en español en la configuración del sistema.</p>
-                      </div>
-                    ) : (
-                      <>
-                        {/* Selector de dialecto/acento */}
-                        <p className="text-xs font-medium text-[#1a1a1a]/40 uppercase tracking-wider mb-3">Dialecto / Acento</p>
-                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-6">
-                          {ES_DIALECTS.map(d => (
-                            <button key={d.lang} onClick={() => setSpanishDialect(d.lang)}
-                              className={`px-3 py-2 rounded-xl border text-xs font-medium transition-all text-center ${spanishDialect === d.lang ? 'bg-[#5A5A40] border-[#5A5A40] text-white shadow-md' : 'bg-[#f9f8f6] border-black/5 text-[#1a1a1a] hover:border-[#5A5A40]/30'}`}>
-                              {d.label}
+
+                {/* ── Kokoro ──────────────────────────────────────────────── */}
+                {mode === 'kokoro' && (
+                  <motion.div key="kokoro" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+                    {(['F', 'M'] as const).map(g => (
+                      <div key={g} className="mb-4">
+                        <p className="text-xs text-[#1a1a1a]/40 uppercase tracking-wider font-medium mb-2">
+                          {g === 'F' ? '♀ Femeninas' : '♂ Masculinas'}
+                        </p>
+                        <div className="grid grid-cols-2 gap-2">
+                          {KOKORO_VOICES.filter(v => v.gender === g).map(v => (
+                            <button key={v.id} onClick={() => setKokoroVoice(v.id)}
+                              className={`flex flex-col p-3 rounded-2xl border text-left transition-all ${kokoroVoice === v.id ? 'bg-[#5A5A40] border-[#5A5A40] text-white' : 'bg-[#f9f8f6] border-black/5 hover:border-[#5A5A40]/30'}`}>
+                              <span className="font-medium text-sm">{v.label}</span>
+                              <span className={`text-xs mt-0.5 ${kokoroVoice === v.id ? 'text-white/70' : 'text-[#1a1a1a]/50'}`}>{v.description}</span>
                             </button>
                           ))}
                         </div>
+                      </div>
+                    ))}
+                  </motion.div>
+                )}
 
-                        {/* Selector de voz */}
-                        <p className="text-xs font-medium text-[#1a1a1a]/40 uppercase tracking-wider mb-3">Voz (Motor)</p>
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                          {spanishVoices.map(v => {
-                            const isGoogle = v.name.toLowerCase().includes('google');
+                {/* ── Coqui XTTS v2 ───────────────────────────────────────── */}
+                {mode === 'coqui' && (
+                  <motion.div key="coqui" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+                    {/* Idioma */}
+                    <p className="text-xs text-[#1a1a1a]/40 uppercase tracking-wider font-medium mb-2">Idioma</p>
+                    <div className="flex flex-wrap gap-1.5 mb-4">
+                      {coquiLanguages.map(lang => (
+                        <button key={lang.code} onClick={() => setCoquiLang(lang.code)}
+                          className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium border transition-all ${coquiLang === lang.code ? 'bg-[#5A5A40] border-[#5A5A40] text-white' : 'bg-[#f9f8f6] border-black/5 text-[#1a1a1a]/70 hover:border-[#5A5A40]/30'}`}>
+                          <span>{lang.flag}</span><span>{lang.name}</span>
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Filtro género + grid hablantes */}
+                    <div className="flex items-center justify-between mb-2">
+                      <p className="text-xs text-[#1a1a1a]/40 uppercase tracking-wider font-medium">
+                        Hablante ({coquiVisible.length})
+                      </p>
+                      <div className="flex gap-1">
+                        {(['all', 'F', 'M'] as const).map(g => (
+                          <button key={g} onClick={() => setCoquiGender(g)}
+                            className={`px-2.5 py-1 rounded-full text-xs font-medium transition-all ${coquiGender === g ? 'bg-[#5A5A40] text-white' : 'bg-[#f9f8f6] text-[#1a1a1a]/50 hover:bg-[#eee]'}`}>
+                            {g === 'all' ? 'Todos' : g === 'F' ? '♀' : '♂'}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-3 sm:grid-cols-4 gap-2 max-h-56 overflow-y-auto pr-1">
+                      {(coquiGender !== 'M' ? coquiFemale : []).map(sp => (
+                        <button key={sp.id} onClick={() => setCoquiSpeaker(sp.id)}
+                          className={`flex flex-col items-start p-2.5 rounded-xl border text-left transition-all ${coquiSpeaker === sp.id ? 'bg-[#5A5A40] border-[#5A5A40] text-white shadow' : 'bg-[#f9f8f6] border-black/5 hover:border-[#5A5A40]/30'}`}>
+                          <span className={`text-[10px] mb-0.5 ${coquiSpeaker === sp.id ? 'text-white/60' : 'text-pink-400'}`}>♀</span>
+                          <span className="font-medium text-xs">{sp.name}</span>
+                        </button>
+                      ))}
+                      {(coquiGender !== 'F' ? coquiMale : []).map(sp => (
+                        <button key={sp.id} onClick={() => setCoquiSpeaker(sp.id)}
+                          className={`flex flex-col items-start p-2.5 rounded-xl border text-left transition-all ${coquiSpeaker === sp.id ? 'bg-[#5A5A40] border-[#5A5A40] text-white shadow' : 'bg-[#f9f8f6] border-black/5 hover:border-[#5A5A40]/30'}`}>
+                          <span className={`text-[10px] mb-0.5 ${coquiSpeaker === sp.id ? 'text-white/60' : 'text-blue-400'}`}>♂</span>
+                          <span className="font-medium text-xs">{sp.name}</span>
+                        </button>
+                      ))}
+                    </div>
+                    {coquiSpeaker && (
+                      <p className="text-xs text-[#1a1a1a]/40 mt-3">
+                        <span className="font-medium text-[#5A5A40]">{coquiCurrentSpeaker?.gender === 'F' ? '♀' : '♂'} {coquiSpeaker}</span>
+                        {' · '}{coquiCurrentLang?.flag} {coquiCurrentLang?.name}
+                      </p>
+                    )}
+                  </motion.div>
+                )}
+
+                {/* ── Web Speech API ───────────────────────────────────────── */}
+                {mode === 'webspeech' && (
+                  <motion.div key="wsv" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+                    {wsvVoices.length === 0 ? (
+                      <p className="text-sm text-[#1a1a1a]/40 text-center py-8">Cargando voces del sistema...</p>
+                    ) : (
+                      <>
+                        {/* Idioma */}
+                        <p className="text-xs text-[#1a1a1a]/40 uppercase tracking-wider font-medium mb-2">
+                          Idioma ({wsvLangs.length} disponibles)
+                        </p>
+                        <div className="flex flex-wrap gap-1.5 mb-4">
+                          {wsvLangs.map(lang => {
+                            const v = wsvVoices.find(x => x.lang === lang);
                             return (
-                              <button key={v.name} onClick={() => setSelectedSpanishVoice(v.name)}
-                                className={`flex flex-col items-start p-4 rounded-2xl border transition-all text-left ${selectedSpanishVoice === v.name ? 'bg-[#5A5A40] border-[#5A5A40] text-white shadow-md' : 'bg-[#f9f8f6] border-black/5 text-[#1a1a1a] hover:border-[#5A5A40]/30'}`}>
-                                <div className="flex items-center gap-2 mb-1">
-                                  <span className="font-medium text-sm leading-tight">{v.name}</span>
-                                  {isGoogle && (
-                                    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${selectedSpanishVoice === v.name ? 'bg-white/20 text-white' : 'bg-[#5A5A40]/10 text-[#5A5A40]'}`}>
-                                      ⭐ HD
-                                    </span>
-                                  )}
-                                </div>
-                                <span className={`text-xs ${selectedSpanishVoice === v.name ? 'text-white/70' : 'text-[#1a1a1a]/50'}`}>
-                                  {v.lang}{v.localService ? ' · Local' : ' · Online'}
-                                </span>
+                              <button key={lang} onClick={() => { setWsvLang(lang); setWsvVoice(wsvVoices.find(x => x.lang === lang)?.id ?? ''); }}
+                                className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium border transition-all ${wsvLang === lang ? 'bg-[#5A5A40] border-[#5A5A40] text-white' : 'bg-[#f9f8f6] border-black/5 text-[#1a1a1a]/70 hover:border-[#5A5A40]/30'}`}>
+                                <span>{v?.flag ?? '🌐'}</span><span>{v?.langName ?? (lang as string).toUpperCase()}</span>
                               </button>
                             );
                           })}
                         </div>
-                        <p className="text-xs text-[#1a1a1a]/40 mt-4 italic">
-                          💡 Combina una voz ⭐ HD con el dialecto que prefieras para mejor resultado.
+
+                        {/* Filtro + voces */}
+                        <div className="flex items-center justify-between mb-2">
+                          <p className="text-xs text-[#1a1a1a]/40 uppercase tracking-wider font-medium">
+                            Voz ({wsvFiltered.length})
+                          </p>
+                          <div className="flex gap-1">
+                            {(['all', 'F', 'M'] as const).map(g => (
+                              <button key={g} onClick={() => setWsvGender(g)}
+                                className={`px-2.5 py-1 rounded-full text-xs font-medium transition-all ${wsvGender === g ? 'bg-[#5A5A40] text-white' : 'bg-[#f9f8f6] text-[#1a1a1a]/50 hover:bg-[#eee]'}`}>
+                                {g === 'all' ? 'Todas' : g === 'F' ? '♀' : '♂'}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
+                          {wsvFiltered.map(v => (
+                            <button key={v.id} onClick={() => setWsvVoice(v.id)}
+                              className={`w-full flex items-center gap-3 p-3 rounded-xl border text-left transition-all ${wsvVoice === v.id ? 'bg-[#5A5A40] border-[#5A5A40] text-white' : 'bg-[#f9f8f6] border-black/5 hover:border-[#5A5A40]/30'}`}>
+                              <span className={`text-sm ${wsvVoice === v.id ? 'text-white/70' : v.gender === 'F' ? 'text-pink-400' : v.gender === 'M' ? 'text-blue-400' : 'text-[#1a1a1a]/30'}`}>
+                                {v.gender === 'F' ? '♀' : v.gender === 'M' ? '♂' : '?'}
+                              </span>
+                              <span className="font-medium text-sm truncate">{v.name}</span>
+                            </button>
+                          ))}
+                          {wsvFiltered.length === 0 && (
+                            <p className="text-xs text-[#1a1a1a]/40 text-center py-4">
+                              No hay voces para este idioma en tu sistema
+                            </p>
+                          )}
+                        </div>
+                        <p className="text-xs text-[#1a1a1a]/35 mt-3 italic">
+                          Las voces dependen de las instaladas en macOS/Windows/Linux.
                         </p>
                       </>
                     )}
@@ -518,121 +555,109 @@ export default function App() {
               </AnimatePresence>
             </motion.section>
 
-            {/* Botón */}
-            <motion.section initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.5 }}
-              className="flex flex-col gap-3">
-              <button
-                onClick={isActive ? cancelGeneration : generateSpeech}
+            {/* ── Texto + Botón ────────────────────────────────────────────── */}
+            <div className="md:col-span-2 flex flex-col gap-5">
+              <motion.section initial={{ opacity: 0, x: 15 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.35 }}
+                className="bg-white rounded-3xl p-6 shadow-sm border border-black/5">
+                <div className="flex items-center gap-2 mb-4 text-[#5A5A40]">
+                  <Mic2 className="w-4 h-4" />
+                  <h2 className="text-sm font-semibold uppercase tracking-widest">Texto</h2>
+                </div>
+                <textarea value={text} onChange={e => setText(e.target.value)}
+                  placeholder="Escribe aquí para convertir a voz..."
+                  className="w-full h-36 p-3 bg-[#f9f8f6] rounded-2xl border border-black/5 focus:outline-none focus:ring-2 focus:ring-[#5A5A40]/20 resize-none text-sm leading-relaxed" />
+                <div className="mt-1.5 text-right text-xs text-[#1a1a1a]/35">{text.length.toLocaleString()} chars</div>
+              </motion.section>
+
+              {/* Botón */}
+              <motion.button initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} transition={{ delay: 0.4 }}
+                onClick={isActive ? cancel : generate}
                 disabled={!text.trim() && !isActive}
-                className="flex-1 bg-[#5A5A40] hover:bg-[#4a4a34] text-white rounded-[32px] p-8 flex flex-col items-center justify-center gap-3 transition-all shadow-lg active:scale-95 relative overflow-hidden disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {/* Barra de descarga del modelo */}
+                className="bg-[#5A5A40] hover:bg-[#4a4a34] text-white rounded-3xl p-7 flex flex-col items-center justify-center gap-3 transition-all shadow-lg active:scale-95 relative overflow-hidden disabled:opacity-50">
                 {status === 'loading' && downloadPct > 0 && (
-                  <motion.div
-                    className="absolute bottom-0 left-0 h-1.5 bg-white/40"
-                    animate={{ width: `${downloadPct}%` }}
-                    transition={{ ease: 'easeOut', duration: 0.3 }}
-                  />
+                  <motion.div className="absolute bottom-0 left-0 h-1.5 bg-white/40"
+                    animate={{ width: `${downloadPct}%` }} transition={{ ease: 'easeOut', duration: 0.3 }} />
                 )}
-                {/* Barra pulsante durante generación */}
                 {(status === 'generating' || status === 'playing') && (
-                  <motion.div
-                    className="absolute bottom-0 left-0 h-1 bg-white/25"
-                    animate={{ width: ['0%', '100%'] }}
-                    transition={{ duration: 3, repeat: Infinity, ease: 'linear' }}
-                  />
+                  <motion.div className="absolute bottom-0 left-0 h-1 bg-white/25"
+                    animate={{ width: ['0%', '100%'] }} transition={{ duration: 3, repeat: Infinity, ease: 'linear' }} />
                 )}
 
-                {isActive
-                  ? <Loader2 className="w-10 h-10 animate-spin opacity-90" />
-                  : <Play className="w-12 h-12 fill-current" />
-                }
-
-                <div className="text-center w-full px-1">
-                  <span className="text-base font-serif italic block leading-snug mb-2">
+                {isActive ? <Loader2 className="w-10 h-10 animate-spin" /> : <Play className="w-10 h-10 fill-current" />}
+                <div className="text-center">
+                  <span className="text-base font-serif italic block mb-1">
                     {status === 'idle' && 'Generar Voz'}
-                    {status === 'loading' && (downloadPct > 0 ? 'Descargando modelo...' : 'Iniciando...')}
-                    {status === 'generating' && 'Generando audio...'}
-                    {status === 'playing' && (language === 'es' ? 'Reproduciendo...' : 'Generando y reproduciendo...')}
+                    {status === 'loading' && (statusMsg || 'Cargando...')}
+                    {status === 'generating' && 'Generando...'}
+                    {status === 'playing' && '▶ Reproduciendo...'}
                   </span>
-
-                  {/* Progreso descarga */}
+                  {mode === 'kokoro' && (status === 'generating' || status === 'playing') && chunksReceived > 0 && (
+                    <p className="text-xs text-white/60">{chunksReceived}/{estimatedTotal} frases{eta ? ` · ${eta}` : ''}</p>
+                  )}
                   {status === 'loading' && downloadPct > 0 && (
-                    <div className="w-full">
+                    <div className="w-full px-2">
                       <div className="flex justify-between text-xs text-white/60 mb-1">
-                        <span className="font-mono font-bold">{downloadPct}%</span>
+                        <span className="font-bold">{downloadPct}%</span>
                         <span>{downloadMB}</span>
                       </div>
                       <div className="w-full bg-white/10 rounded-full h-1.5">
-                        <motion.div
-                          className="bg-white/60 h-1.5 rounded-full"
-                          animate={{ width: `${downloadPct}%` }}
-                          transition={{ ease: 'easeOut', duration: 0.3 }}
-                        />
+                        <motion.div className="bg-white/60 h-1.5 rounded-full"
+                          animate={{ width: `${downloadPct}%` }} transition={{ ease: 'easeOut' }} />
                       </div>
-                      <p className="text-xs text-white/35 mt-1.5">Solo se descarga la primera vez</p>
                     </div>
                   )}
-
-                  {/* Contador oraciones (inglés) */}
-                  {language === 'en' && (status === 'generating' || status === 'playing') && chunksReceived > 0 && (
-                    <div className="text-xs text-white/60 space-y-0.5">
-                      <p>
-                        {chunksReceived} / ~{estimatedTotal} {estimatedTotal === 1 ? 'oración' : 'oraciones'}
-                      </p>
-                      {eta && <p className="font-medium text-white/80">{eta}</p>}
-                    </div>
-                  )}
-
                   {isActive && <p className="text-xs text-white/30 mt-1">Toca para cancelar</p>}
                 </div>
-
-                {isActive && <Square className="w-3.5 h-3.5 absolute top-4 right-4 opacity-40" />}
-              </button>
-            </motion.section>
+                {isActive && <Square className="w-3 h-3 absolute top-4 right-4 opacity-30" />}
+              </motion.button>
+            </div>
           </div>
 
-          {/* Output: WAV solo para inglés */}
+          {/* Audio output */}
           <AnimatePresence>
             {(audioUrl || error) && (
-              <motion.section
-                initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 20 }}
-                className={`rounded-[32px] p-8 border ${error ? 'bg-red-50 border-red-100' : 'bg-white border-black/5 shadow-sm'}`}
-              >
+              <motion.section initial={{ opacity: 0, y: 15 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
+                className={`rounded-3xl p-6 border ${error ? 'bg-red-50 border-red-100' : 'bg-white border-black/5 shadow-sm'}`}>
                 {error ? (
-                  <div className="flex items-center gap-3 text-red-600">
-                    <AlertCircle className="w-6 h-6 flex-shrink-0" />
-                    <p className="font-medium">{error}</p>
+                  <div className="flex items-start gap-3 text-red-600">
+                    <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
+                    <div>
+                      <p className="font-medium text-sm">{error}</p>
+                      {mode === 'coqui' && (
+                        <p className="text-xs mt-1 text-red-400">
+                          ¿Está corriendo el servidor? <code className="bg-red-100 px-1 rounded">npm run server</code>
+                        </p>
+                      )}
+                    </div>
                   </div>
                 ) : (
-                  <div className="w-full">
+                  <div>
                     <div className="flex items-center justify-between mb-4">
                       <div>
-                        <h3 className="font-serif italic text-xl">Audio Completo</h3>
-                        <p className="text-xs text-[#1a1a1a]/40 mt-0.5">Listo para reproducir y descargar</p>
+                        <h3 className="font-serif italic text-lg">Audio Generado</h3>
+                        <p className="text-xs text-[#1a1a1a]/40 mt-0.5">
+                          {mode === 'coqui' ? `XTTS v2 · ${coquiCurrentSpeaker?.gender === 'F' ? '♀' : '♂'} ${coquiSpeaker} · ${coquiCurrentLang?.flag} ${coquiCurrentLang?.name}` :
+                            mode === 'webspeech' ? `Web Speech API · ${wsvVoices.find(v => v.id === wsvVoice)?.name ?? ''}` :
+                              `Kokoro TTS · ${kokoroVoice}`}
+                        </p>
                       </div>
-                      <button onClick={handleDownload}
-                        className="flex items-center gap-1.5 px-4 py-2 bg-[#5A5A40] text-white rounded-full text-sm font-medium hover:bg-[#4a4a34] transition-colors">
-                        <Download className="w-4 h-4" />
-                        Descargar WAV
-                      </button>
+                      {mode !== 'webspeech' && (
+                        <button onClick={handleDownload}
+                          className="flex items-center gap-1.5 px-4 py-2 bg-[#5A5A40] text-white rounded-full text-sm font-medium hover:bg-[#4a4a34] transition-colors">
+                          <Download className="w-4 h-4" />WAV
+                        </button>
+                      )}
                     </div>
-                    <audio src={audioUrl!} controls className="w-full h-12 accent-[#5A5A40]" />
+                    {audioUrl && <audio src={audioUrl} controls className="w-full accent-[#5A5A40]" />}
                   </div>
                 )}
               </motion.section>
             )}
           </AnimatePresence>
-        </main>
+        </div>
 
-        <footer className="mt-20 pt-8 border-t border-black/5 text-center text-[#1a1a1a]/40 text-sm">
-          <p>
-            © {new Date().getFullYear()} Voice Studio ·{' '}
-            <a href="https://github.com/hexgrad/kokoro" target="_blank" rel="noopener noreferrer" className="hover:text-[#5A5A40] transition-colors">Kokoro TTS</a>
-            {' · '}
-            <a href="https://developer.mozilla.org/en-US/docs/Web/API/Web_Speech_API" target="_blank" rel="noopener noreferrer" className="hover:text-[#5A5A40] transition-colors">Web Speech API</a>
-            {' · '}Open Source · Apache 2.0
-          </p>
+        <footer className="mt-16 text-center text-xs text-[#1a1a1a]/35">
+          Voice Studio · <a href="https://github.com/coqui-ai/TTS" target="_blank" rel="noopener noreferrer" className="hover:text-[#5A5A40]">Coqui TTS</a> · <a href="https://github.com/hexgrad/kokoro" target="_blank" rel="noopener noreferrer" className="hover:text-[#5A5A40]">Kokoro TTS</a> · Open Source
         </footer>
       </div>
     </div>

@@ -6,3 +6,11 @@ coverage/
 *.log
 .env*
 !.env.example
+# Python / Coqui TTS
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+voice_refs/
+server.ts
+
