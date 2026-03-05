@@ -17,6 +17,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
+from pydantic import BaseModel
 
 # En HF Spaces usa puerto 7860; localmente 3001
 PORT = int(os.environ.get("PORT", "7860" if os.environ.get("SPACE_ID") else "3001"))
@@ -125,16 +126,23 @@ def get_languages():
     return XTTS_LANGUAGES
 
 
-@app.get("/api/tts")
-def tts_endpoint(text: str, speaker: str = "Claribel Dervla", language: str = "es"):
-    if not text.strip():
+
+class TtsRequest(BaseModel):
+    text: str
+    speaker: str = "Claribel Dervla"
+    language: str = "es"
+
+
+@app.post("/api/tts")
+def tts_endpoint(req: TtsRequest):
+    if not req.text.strip():
         raise HTTPException(status_code=400, detail="'text' no puede estar vacío.")
 
-    print(f"[TTS] lang={language} speaker={speaker!r} len={len(text)}")
+    print(f"[TTS] lang={req.language} speaker={req.speaker!r} len={len(req.text)}")
 
     try:
         tts = get_xtts()
-        samples = tts.tts(text=text, speaker=speaker, language=language)
+        samples = tts.tts(text=req.text, speaker=req.speaker, language=req.language)
         sample_rate = tts.synthesizer.tts_config.audio["output_sample_rate"]
         wav = samples_to_wav(samples, sample_rate)
         return Response(content=wav, media_type="audio/wav",

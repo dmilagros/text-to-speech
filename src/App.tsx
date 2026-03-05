@@ -123,24 +123,36 @@ function KaraokeDisplay({ text, activeChar }: { text: string; activeChar: number
     return best;
   }, [activeChar, tokens]);
 
+  // Palabras sin espacios — flex wrap para que el fontSize las reposicione correctamente
+  const wordTokens = useMemo(() => tokens.filter(t => !t.isSpace), [tokens]);
+
+  // Recalcula activeIdx indexado sobre wordTokens
+  const activeWordIdx = useMemo(() => {
+    if (activeChar < 0) return -1;
+    let best = -1;
+    for (let i = 0; i < wordTokens.length; i++) {
+      if (wordTokens[i].charStart <= activeChar) best = i;
+    }
+    return best;
+  }, [activeChar, wordTokens]);
+
   return (
-    <div className="leading-relaxed text-center px-2 py-4 select-none">
-      {tokens.map((t, i) => {
-        if (t.isSpace) return <span key={i}>{t.word}</span>;
-        const isActive = i === activeIdx;
-        const isPast = !isActive && activeIdx >= 0 && i < activeIdx;
+    <div className="flex flex-wrap justify-center items-start content-start gap-x-3 gap-y-2 px-2 py-4 select-none h-[200px] overflow-y-auto">
+      {wordTokens.map((t, i) => {
+        const isActive = i === activeWordIdx;
+        const isPast = !isActive && activeWordIdx >= 0 && i < activeWordIdx;
         return (
           <motion.span
             key={i}
-            animate={isActive ? { scale: 1.35, opacity: 1 } : isPast ? { scale: 1, opacity: 0.4 } : { scale: 1, opacity: 0.85 }}
-            transition={{ type: 'spring', stiffness: 400, damping: 25 }}
-            className={`inline-block font-serif transition-colors duration-150 ${isActive
-                ? 'text-[#5A5A40] font-bold'
-                : isPast
-                  ? 'text-[#1a1a1a]/40'
-                  : 'text-[#1a1a1a]'
-              }`}
-            style={{ transformOrigin: 'bottom center' }}
+            animate={{
+              opacity: isActive ? 1 : isPast ? 0.22 : 0.55,
+              color: isActive ? '#5A5A40' : '#1a1a1a',
+              textShadow: isActive
+                ? '0 0 20px rgba(90,90,64,0.45), 0 0 8px rgba(90,90,64,0.3)'
+                : '0 0 0px transparent',
+            }}
+            transition={{ duration: 0.18, ease: 'easeOut' }}
+            style={{ display: 'inline-block', fontWeight: 600 }}
           >
             {t.word}
           </motion.span>
@@ -202,6 +214,8 @@ export default function App() {
   const audioElRef = useRef<HTMLAudioElement | null>(null);
   const rafRef = useRef<number>(0);
   const karaokeAudioRef = useRef<HTMLAudioElement | null>(null);
+  // Ref estable de startTimeKaraoke para no recrear el worker al cambiar el texto
+  const startTimeKaraokeRef = useRef<(el: HTMLAudioElement) => void>(() => { });
 
   // Tokens memoizados para karaoke por tiempo (palabras no-espacio)
   const wordsOnly = useMemo(() => tokenize(text).filter(t => !t.isSpace), [text]);
@@ -238,6 +252,9 @@ export default function App() {
     setActiveChar(-1);
     setIsKaraoke(false);
   }, []);
+
+  // Mantener ref sincronizada para el worker (evita recreación)
+  useEffect(() => { startTimeKaraokeRef.current = startTimeKaraoke; }, [startTimeKaraoke]);
 
   // ── Cargar speakers + languages ───────────────────────────────────────────
 
@@ -335,15 +352,12 @@ export default function App() {
           const blob = mergeToWavBlob(receivedChunksRef.current);
           const url = URL.createObjectURL(blob);
           if (downloadRef.current) URL.revokeObjectURL(downloadRef.current);
-          downloadRef.current = url; setAudioUrl(url);
-
-          // Karaoke con el audio completo generado por Kokoro
-          const audio = new Audio(url);
-          audioElRef.current = audio;
-          startTimeKaraoke(audio);
-          audio.play();
-
-          setStatus('playing'); setStatusMsg('');
+          downloadRef.current = url;
+          setAudioUrl(url);
+          // El WebAudio (streaming) ya reprodujo el audio.
+          // Solo guardamos la URL para el player — karaoke se activa si el usuario da play allí.
+          setStatus('idle');
+          setStatusMsg('');
           break;
         }
         case 'error': setStatus('idle'); setStatusMsg(''); setError(msg.message); break;
@@ -351,7 +365,7 @@ export default function App() {
     };
     workerRef.current = worker;
     return () => { worker.terminate(); };
-  }, [playChunk, startTimeKaraoke, estimatedTotal]);
+  }, [playChunk]);
 
   // ── Generar audio ─────────────────────────────────────────────────────────
 
@@ -361,8 +375,12 @@ export default function App() {
     setStatus('loading'); setError(null); setAudioUrl(null); stopKaraoke();
     setStatusMsg(`${coquiCurrentSpeaker?.name ?? coquiSpeaker} · ${coquiCurrentLang?.name ?? coquiLang}`);
     try {
-      const params = new URLSearchParams({ text, speaker: coquiSpeaker, language: coquiLang });
-      const res = await fetch(`${API_BASE}/api/tts?${params}`, { signal: abortRef.current.signal });
+      const res = await fetch(`${API_BASE}/api/tts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, speaker: coquiSpeaker, language: coquiLang }),
+        signal: abortRef.current.signal,
+      });
       if (!res.ok) { const e = await res.json().catch(() => ({ detail: `HTTP ${res.status}` })); throw new Error(e.detail); }
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
@@ -474,38 +492,37 @@ export default function App() {
 
         <div className="grid gap-6">
 
-          {/* ── VISTA KARAOKE ─────────────────────────────────────────────── */}
-          <AnimatePresence>
+          {/* ── VISTA KARAOKE — siempre visible ─────────────────────────────── */}
+          <motion.section
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="bg-white rounded-3xl p-8 shadow-sm border border-black/5 relative overflow-hidden">
+
+            {/* Pulso de fondo animado (solo durante reproducción) */}
             {isKaraoke && (
-              <motion.section
-                initial={{ opacity: 0, y: -20, scale: 0.97 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, y: -20, scale: 0.97 }}
-                transition={{ type: 'spring', stiffness: 300, damping: 30 }}
-                className="bg-white rounded-3xl p-8 shadow-lg border border-black/5 relative overflow-hidden">
-
-                {/* Pulso de fondo animado */}
-                <motion.div
-                  className="absolute inset-0 pointer-events-none"
-                  animate={{ background: ['rgba(90,90,64,0.03)', 'rgba(90,90,64,0.07)', 'rgba(90,90,64,0.03)'] }}
-                  transition={{ duration: 1.5, repeat: Infinity, ease: 'easeInOut' }}
-                />
-
-                <div className="flex items-center gap-2 mb-4 text-[#5A5A40]">
-                  <motion.div
-                    animate={{ scale: [1, 1.2, 1] }}
-                    transition={{ duration: 0.8, repeat: Infinity }}
-                    className="w-2 h-2 rounded-full bg-[#5A5A40]"
-                  />
-                  <span className="text-xs font-semibold uppercase tracking-widest">Reproduciendo</span>
-                </div>
-
-                <div className="text-xl md:text-2xl min-h-[6rem] flex items-center justify-center">
-                  <KaraokeDisplay text={text} activeChar={activeChar} />
-                </div>
-              </motion.section>
+              <motion.div
+                className="absolute inset-0 pointer-events-none"
+                animate={{ background: ['rgba(90,90,64,0.03)', 'rgba(90,90,64,0.08)', 'rgba(90,90,64,0.03)'] }}
+                transition={{ duration: 1.5, repeat: Infinity, ease: 'easeInOut' }}
+              />
             )}
-          </AnimatePresence>
+
+            <div className="flex items-center gap-2 mb-4 text-[#5A5A40]">
+              {isKaraoke ? (
+                <motion.div animate={{ scale: [1, 1.2, 1] }} transition={{ duration: 0.8, repeat: Infinity }}
+                  className="w-2 h-2 rounded-full bg-[#5A5A40]" />
+              ) : (
+                <div className="w-2 h-2 rounded-full bg-[#5A5A40]/30" />
+              )}
+              <span className="text-xs font-semibold uppercase tracking-widest">
+                {isKaraoke ? 'Reproduciendo' : 'Karaoke'}
+              </span>
+            </div>
+
+            <div className="text-xl md:text-2xl min-h-[6rem] flex items-center justify-center">
+              <KaraokeDisplay text={text} activeChar={activeChar} />
+            </div>
+          </motion.section>
 
           {/* Engine selector */}
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.2 }}
