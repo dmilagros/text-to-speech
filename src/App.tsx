@@ -374,31 +374,103 @@ export default function App() {
     abortRef.current = new AbortController();
     setStatus('loading'); setError(null); setAudioUrl(null); stopKaraoke();
     setStatusMsg(`${coquiCurrentSpeaker?.name ?? coquiSpeaker} · ${coquiCurrentLang?.name ?? coquiLang}`);
+
+    const allChunks: { audio: Float32Array; sampleRate: number }[] = [];
+
     try {
-      const res = await fetch(`${API_BASE}/api/tts`, {
+      const res = await fetch(`${API_BASE}/api/tts-stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text, speaker: coquiSpeaker, language: coquiLang }),
         signal: abortRef.current.signal,
       });
       if (!res.ok) { const e = await res.json().catch(() => ({ detail: `HTTP ${res.status}` })); throw new Error(e.detail); }
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      if (downloadRef.current) URL.revokeObjectURL(downloadRef.current);
-      downloadRef.current = url; setAudioUrl(url);
 
-      audioElRef.current?.pause();
-      const audio = new Audio(url);
-      audioElRef.current = audio;
-      setStatus('playing');
-      startTimeKaraoke(audio);
-      await audio.play();
+      const reader = res.body!.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      let ctx = audioCtxRef.current;
+      if (!ctx || ctx.state === 'closed') { ctx = new AudioContext(); audioCtxRef.current = ctx; }
+      let nextStart = ctx.currentTime + 0.1;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+
+        const lines = buf.split('\n');
+        buf = lines.pop() ?? '';
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const msg = JSON.parse(line) as {
+            done?: boolean; index?: number; total?: number;
+            charStart?: number; audio?: string; error?: string;
+          };
+          if (msg.done) break;
+          if (msg.error) { console.warn('[Coqui stream]', msg.error); continue; }
+          if (!msg.audio) continue;
+
+          // Decodificar base64 → ArrayBuffer → AudioBuffer
+          const raw = atob(msg.audio);
+          const ab = new Uint8Array(raw.length);
+          for (let i = 0; i < raw.length; i++) ab[i] = raw.charCodeAt(i);
+          const audioBuffer = await ctx.decodeAudioData(ab.buffer);
+
+          // Guardar para descarga
+          const pcm = new Float32Array(audioBuffer.length);
+          audioBuffer.copyFromChannel(pcm, 0);
+          allChunks.push({ audio: pcm, sampleRate: audioBuffer.sampleRate });
+
+          // Programar reproducción sin gap
+          const src = ctx.createBufferSource();
+          src.buffer = audioBuffer;
+          src.connect(ctx.destination);
+          const start = Math.max(nextStart, ctx.currentTime + 0.05);
+          const chunkCharStart = msg.charStart ?? 0;
+          src.onended = () => { /* karaoke avanzado por charStart */ };
+          src.start(start);
+          // Actualizar karaoke cuando comience este chunk
+          const delay = (start - ctx.currentTime) * 1000;
+          setTimeout(() => setActiveChar(chunkCharStart), Math.max(0, delay));
+          nextStart = start + audioBuffer.duration;
+
+          if (allChunks.length === 1) {
+            setStatus('playing');
+            setIsKaraoke(true);
+            setStatusMsg(`${coquiCurrentSpeaker?.name ?? coquiSpeaker} · ${coquiCurrentLang?.name ?? coquiLang}`);
+          }
+          setChunksReceived(allChunks.length);
+          // ETA
+          if (msg.total && msg.total > 1) {
+            const done = (msg.index ?? 0) + 1;
+            const remaining = msg.total - done;
+            setEta(remaining > 0 ? `~${remaining} oración${remaining > 1 ? 'es' : ''}` : '');
+          }
+        }
+      }
+
+      // Esperar que termine el último chunk y limpiar
+      const totalDuration = nextStart - (audioCtxRef.current?.currentTime ?? 0);
+      setTimeout(() => {
+        setStatus('idle'); setStatusMsg(''); setEta('');
+        setActiveChar(-1); setIsKaraoke(false);
+      }, Math.max(0, totalDuration * 1000 + 200));
+
+      // WAV completo para descarga
+      if (allChunks.length > 0) {
+        const blob = mergeToWavBlob(allChunks);
+        const url = URL.createObjectURL(blob);
+        if (downloadRef.current) URL.revokeObjectURL(downloadRef.current);
+        downloadRef.current = url; setAudioUrl(url);
+      }
     } catch (err: unknown) {
       if ((err as Error)?.name === 'AbortError') return;
       setStatus('idle'); setStatusMsg(''); stopKaraoke();
       setError(`${err instanceof Error ? err.message : String(err)}`);
     }
-  }, [text, coquiSpeaker, coquiLang, coquiCurrentSpeaker, coquiCurrentLang, startTimeKaraoke, stopKaraoke]);
+  }, [text, coquiSpeaker, coquiLang, coquiCurrentSpeaker, coquiCurrentLang, stopKaraoke]);
+
 
   const generateWebSpeech = useCallback(() => {
     if (!text.trim()) return;

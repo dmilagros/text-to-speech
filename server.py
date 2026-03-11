@@ -9,6 +9,9 @@ import os
 os.environ.setdefault("COQUI_TOS_AGREED", "1")
 
 import io
+import re
+import json
+import base64
 import wave
 from typing import Any
 
@@ -16,8 +19,38 @@ import numpy as np
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
+
+
+def split_sentences(text: str, max_len: int = 220) -> list[str]:
+    """Divide texto en segmentos pronunciables de ≤ max_len caracteres."""
+    # Separar en oraciones por signos de puntuación fuertes
+    raw = re.split(r'(?<=[.!?;\u3002\uff01\uff1f])\s*', text.strip())
+    result: list[str] = []
+    for s in raw:
+        s = s.strip()
+        if not s:
+            continue
+        if len(s) <= max_len:
+            result.append(s)
+        else:
+            # Partir por comas / guiones si la oración es muy larga
+            parts = re.split(r'(?<=[,\u3001\-–—])\s*', s)
+            buf = ""
+            for p in parts:
+                if not p.strip():
+                    continue
+                if len(buf) + len(p) + 1 <= max_len:
+                    buf = (buf + " " + p).strip() if buf else p
+                else:
+                    if buf:
+                        result.append(buf)
+                    buf = p
+            if buf:
+                result.append(buf)
+    return [s for s in result if s.strip()]
+
 
 # En HF Spaces usa puerto 7860; localmente 3001
 PORT = int(os.environ.get("PORT", "7860" if os.environ.get("SPACE_ID") else "3001"))
@@ -150,6 +183,53 @@ def tts_endpoint(req: TtsRequest):
     except Exception as e:
         print(f"[TTS] Error: {e}")
         raise HTTPException(status_code=502, detail=f"Error: {e}")
+
+
+@app.post("/api/tts-stream")
+def tts_stream(req: TtsRequest):
+    """Streaming: sintetiza oración por oración y envía cada una como NDJSON.
+    Permite reproducción progresiva: el cliente escucha la primera oración
+    ~3-5s después de enviar la petición, sin esperar todo el texto.
+    """
+    if not req.text.strip():
+        raise HTTPException(status_code=400, detail="'text' no puede estar vacío.")
+
+    sentences = split_sentences(req.text)
+    total = len(sentences)
+    print(f"[TTS-STREAM] {total} oraciones · lang={req.language} speaker={req.speaker!r}")
+
+    # Mapear posición de cada oración en el texto original (para karaoke)
+    char_map: list[int] = []
+    pos = 0
+    for s in sentences:
+        idx = req.text.find(s, pos)
+        char_map.append(idx if idx >= 0 else pos)
+        pos = (idx if idx >= 0 else pos) + len(s)
+
+    def generate():
+        tts = get_xtts()
+        sr = tts.synthesizer.tts_config.audio["output_sample_rate"]
+        for i, sentence in enumerate(sentences):
+            try:
+                samples = tts.tts(text=sentence, speaker=req.speaker, language=req.language)
+                wav = samples_to_wav(samples, sr)
+                b64 = base64.b64encode(wav).decode()
+                chunk = {
+                    "index": i, "total": total,
+                    "charStart": char_map[i], "text": sentence,
+                    "audio": b64, "done": False,
+                }
+                yield json.dumps(chunk, ensure_ascii=False) + "\n"
+            except Exception as e:
+                print(f"[TTS-STREAM] Error oración {i}: {e}")
+                yield json.dumps({"index": i, "error": str(e), "done": False}) + "\n"
+        yield json.dumps({"done": True}) + "\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
