@@ -86,6 +86,39 @@ const KOKORO_VOICES = [
 
 // ── WAV encoder (Kokoro) ──────────────────────────────────────────────────────
 
+/** Concatena chunks de WAV a nivel de bytes (para Coqui streaming). Sin pasar por WebAudio. */
+function mergeRawWavParts(parts: Uint8Array[]): Blob {
+  if (!parts.length) return new Blob([], { type: 'audio/wav' });
+  const firstView = new DataView(parts[0].buffer, parts[0].byteOffset);
+  const sampleRate = firstView.getUint32(24, true);
+  // Encontrar offset del chunk 'data' en cada parte
+  const getPcm = (p: Uint8Array): Uint8Array => {
+    const v = new DataView(p.buffer, p.byteOffset);
+    let i = 12;
+    while (i < p.length - 8) {
+      const id = String.fromCharCode(p[i], p[i + 1], p[i + 2], p[i + 3]);
+      const sz = v.getUint32(i + 4, true);
+      if (id === 'data') return p.slice(i + 8, i + 8 + sz);
+      i += 8 + sz;
+    }
+    return p.slice(44); // fallback: skip standard 44-byte header
+  };
+  const pcms = parts.map(getPcm);
+  const totalPcm = pcms.reduce((s, p) => s + p.byteLength, 0);
+  const wavBuf = new ArrayBuffer(44 + totalPcm);
+  const v = new DataView(wavBuf); let pos = 0;
+  const wS = (s: string) => { for (const c of s) v.setUint8(pos++, c.charCodeAt(0)); };
+  const w32 = (d: number) => { v.setUint32(pos, d, true); pos += 4; };
+  const w16 = (d: number) => { v.setUint16(pos, d, true); pos += 2; };
+  wS('RIFF'); w32(36 + totalPcm); wS('WAVE');
+  wS('fmt '); w32(16); w16(1); w16(1); w32(sampleRate); w32(sampleRate * 2); w16(2); w16(16);
+  wS('data'); w32(totalPcm);
+  const out = new Uint8Array(wavBuf);
+  let off = 44;
+  for (const p of pcms) { out.set(p, off); off += p.byteLength; }
+  return new Blob([wavBuf], { type: 'audio/wav' });
+}
+
 function mergeToWavBlob(chunks: { audio: Float32Array; sampleRate: number }[]): Blob {
   if (!chunks.length) return new Blob([], { type: 'audio/wav' });
   const sr = chunks[0].sampleRate;
@@ -376,6 +409,7 @@ export default function App() {
     setStatusMsg(`${coquiCurrentSpeaker?.name ?? coquiSpeaker} · ${coquiCurrentLang?.name ?? coquiLang}`);
 
     const allChunks: { audio: Float32Array; sampleRate: number }[] = [];
+    const rawWavParts: Uint8Array[] = []; // para descarga robusta
 
     try {
       const res = await fetch(`${API_BASE}/api/tts-stream`, {
@@ -429,9 +463,11 @@ export default function App() {
           const raw = atob(msg.audio);
           const ab = new Uint8Array(raw.length);
           for (let i = 0; i < raw.length; i++) ab[i] = raw.charCodeAt(i);
-          const audioBuffer = await ctx.decodeAudioData(ab.buffer);
+          // Guardar bytes RAW para descarga (antes de decodeAudioData)
+          rawWavParts.push(new Uint8Array(ab));
 
-          // Guardar para descarga
+          // Guardar Float32 para Kokoro-compat
+          const audioBuffer = await ctx.decodeAudioData(ab.buffer.slice(0));
           const pcm = new Float32Array(audioBuffer.length);
           audioBuffer.copyFromChannel(pcm, 0);
           allChunks.push({ audio: pcm, sampleRate: audioBuffer.sampleRate });
@@ -489,9 +525,9 @@ export default function App() {
         setActiveChar(-1); setIsKaraoke(false);
       }, Math.max(0, totalDuration * 1000 + 300));
 
-      // WAV completo para descarga
-      if (allChunks.length > 0) {
-        const blob = mergeToWavBlob(allChunks);
+      // WAV completo para descarga (bytes RAW — fiable en HF Spaces)
+      if (rawWavParts.length > 0) {
+        const blob = mergeRawWavParts(rawWavParts);
         const url = URL.createObjectURL(blob);
         if (downloadRef.current) URL.revokeObjectURL(downloadRef.current);
         downloadRef.current = url; setAudioUrl(url);
