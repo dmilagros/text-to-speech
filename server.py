@@ -49,7 +49,8 @@ def split_sentences(text: str, max_len: int = 220) -> list[str]:
                     buf = p
             if buf:
                 result.append(buf)
-    return [s for s in result if s.strip()]
+    # Filtrar: descartar segmentos que son solo puntuación o espacios
+    return [s for s in result if s.strip() and re.search(r'\w', s)]
 
 
 # En HF Spaces usa puerto 7860; localmente 3001
@@ -211,7 +212,11 @@ def tts_stream(req: TtsRequest):
         sr = tts.synthesizer.tts_config.audio["output_sample_rate"]
         for i, sentence in enumerate(sentences):
             try:
-                samples = tts.tts(text=sentence, speaker=req.speaker, language=req.language)
+                # Limpiar puntuación final para que XTTS no la pronuncie
+                clean = re.sub(r'[.,;:\-–—]+$', '', sentence).strip()
+                if not clean:
+                    continue
+                samples = tts.tts(text=clean, speaker=req.speaker, language=req.language)
                 wav = samples_to_wav(samples, sr)
                 b64 = base64.b64encode(wav).decode()
                 chunk = {

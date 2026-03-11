@@ -393,6 +393,20 @@ export default function App() {
       if (!ctx || ctx.state === 'closed') { ctx = new AudioContext(); audioCtxRef.current = ctx; }
       let nextStart = ctx.currentTime + 0.1;
 
+      // Schedule de karaoke: [{ startTime (AudioContext), charStart }]
+      const schedule: { startTime: number; charStart: number }[] = [];
+      let rafId = 0;
+      const tickKaraoke = () => {
+        const now = audioCtxRef.current?.currentTime ?? 0;
+        let active = -1;
+        for (const s of schedule) {
+          if (s.startTime <= now) active = s.charStart;
+          else break;
+        }
+        if (active >= 0) setActiveChar(active);
+        rafId = requestAnimationFrame(tickKaraoke);
+      };
+
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -405,7 +419,7 @@ export default function App() {
           if (!line.trim()) continue;
           const msg = JSON.parse(line) as {
             done?: boolean; index?: number; total?: number;
-            charStart?: number; audio?: string; error?: string;
+            charStart?: number; text?: string; audio?: string; error?: string;
           };
           if (msg.done) break;
           if (msg.error) { console.warn('[Coqui stream]', msg.error); continue; }
@@ -428,17 +442,34 @@ export default function App() {
           src.connect(ctx.destination);
           const start = Math.max(nextStart, ctx.currentTime + 0.05);
           const chunkCharStart = msg.charStart ?? 0;
-          src.onended = () => { /* karaoke avanzado por charStart */ };
+          const chunkText = msg.text ?? '';
+          const chunkCharEnd = chunkCharStart + chunkText.length;
+          const dur = audioBuffer.duration;
+
+          // Distribuir cada PALABRA de esta oración en el schedule
+          // para sincronización word-level dentro de la duración del chunk
+          const sentWords = wordsOnly.filter(
+            w => w.charStart >= chunkCharStart && w.charStart < chunkCharEnd
+          );
+          if (sentWords.length > 0) {
+            const wordDur = dur / sentWords.length;
+            sentWords.forEach((w, wi) => {
+              schedule.push({ startTime: start + wi * wordDur, charStart: w.charStart });
+            });
+          } else {
+            // Sin palabras reconocidas → marcar al inicio del chunk
+            schedule.push({ startTime: start, charStart: chunkCharStart });
+          }
+
           src.start(start);
-          // Actualizar karaoke cuando comience este chunk
-          const delay = (start - ctx.currentTime) * 1000;
-          setTimeout(() => setActiveChar(chunkCharStart), Math.max(0, delay));
-          nextStart = start + audioBuffer.duration;
+          nextStart = start + dur;
 
           if (allChunks.length === 1) {
             setStatus('playing');
             setIsKaraoke(true);
             setStatusMsg(`${coquiCurrentSpeaker?.name ?? coquiSpeaker} · ${coquiCurrentLang?.name ?? coquiLang}`);
+            // Arrancar el rAF loop de karaoke
+            rafId = requestAnimationFrame(tickKaraoke);
           }
           setChunksReceived(allChunks.length);
           // ETA
@@ -453,9 +484,10 @@ export default function App() {
       // Esperar que termine el último chunk y limpiar
       const totalDuration = nextStart - (audioCtxRef.current?.currentTime ?? 0);
       setTimeout(() => {
+        cancelAnimationFrame(rafId);
         setStatus('idle'); setStatusMsg(''); setEta('');
         setActiveChar(-1); setIsKaraoke(false);
-      }, Math.max(0, totalDuration * 1000 + 200));
+      }, Math.max(0, totalDuration * 1000 + 300));
 
       // WAV completo para descarga
       if (allChunks.length > 0) {
@@ -469,7 +501,7 @@ export default function App() {
       setStatus('idle'); setStatusMsg(''); stopKaraoke();
       setError(`${err instanceof Error ? err.message : String(err)}`);
     }
-  }, [text, coquiSpeaker, coquiLang, coquiCurrentSpeaker, coquiCurrentLang, stopKaraoke]);
+  }, [text, coquiSpeaker, coquiLang, coquiCurrentSpeaker, coquiCurrentLang, stopKaraoke, wordsOnly]);
 
 
   const generateWebSpeech = useCallback(() => {
